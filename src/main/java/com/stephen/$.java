@@ -5,6 +5,7 @@ import eraftpb.Eraftpb;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import com.stephen.lang.Vec;
 
 public class $ {
 
@@ -19,15 +20,16 @@ public class $ {
         return true;
     }
 
-    public static Long limitSize(List<Eraftpb.Entry> entries, Long max) {
+    public static Long limitSize(Vec<Eraftpb.Entry> entries, Long max) {
         if (entries.size() <= 1 || max == null) {
             return null;
         }
-
         AtomicLong size = new AtomicLong(0);
-        return entries.stream()
+        long limit = entries.stream()
                 .takeWhile(e -> size.addAndGet(e.getSerializedSize()) <= max)
                 .count();
+        entries.truncate(limit);
+        return limit;
     }
 
     public static <VALUE> boolean isEmpty(Collection<VALUE> collection) {

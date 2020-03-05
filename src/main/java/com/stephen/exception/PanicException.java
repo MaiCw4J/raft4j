@@ -34,4 +34,9 @@ public class PanicException extends RuntimeException {
     protected PanicException(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
         super(message, cause, enableSuppression, writableStackTrace);
     }
+
+    public PanicException(Logger log, RaftErrorException e) {
+        super(e);
+        log.error("unexpected error", e);
+    }
 }

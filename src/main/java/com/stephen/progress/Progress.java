@@ -3,12 +3,14 @@ package com.stephen.progress;
 import com.stephen.constanst.ProgressState;
 import com.stephen.exception.PanicException;
 import lombok.Getter;
+import lombok.Setter;
 
 import static com.stephen.constanst.Globals.INVALID_INDEX;
 
 @Getter
 public class Progress implements Cloneable {
     /// How much state is matched.
+    @Setter
     private long matched;
 
     /// The next index to apply

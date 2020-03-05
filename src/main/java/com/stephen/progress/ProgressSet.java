@@ -2,17 +2,20 @@ package com.stephen.progress;
 
 import com.stephen.QuorumFunction;
 import com.stephen.QuorumUtils;
+import com.stephen.constanst.CandidacyStatus;
 import com.stephen.constanst.ProgressRole;
 import com.stephen.exception.PanicException;
 import com.stephen.exception.RaftError;
 import com.stephen.exception.RaftErrorException;
 import eraftpb.Eraftpb;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
 @Slf4j
+@Getter
 public class ProgressSet {
 
     private Map<Long, Progress> progress;
@@ -187,5 +190,25 @@ public class ProgressSet {
         return matched.get(quorum);
 
     }
+
+
+    /// Returns the Candidate's eligibility in the current election.
+    ///
+    /// If it is still eligible, it should continue polling nodes and checking.
+    /// Eventually, the election will result in this returning either `Elected`
+    /// or `Ineligible`, meaning the election can be concluded.
+    public CandidacyStatus candidacyStatus(Map<Long, Boolean> votes, QuorumFunction quorumFunction) {
+        var partitioningMap = votes.entrySet().stream()
+                .collect(Collectors.partitioningBy(Map.Entry::getValue, Collectors.mapping(Map.Entry::getKey, Collectors.toSet())));
+
+        if (this.configuration.hasQuorum(partitioningMap.get(true), quorumFunction)) {
+            return CandidacyStatus.Elected;
+        } else if (this.configuration.hasQuorum(partitioningMap.get(false), quorumFunction)) {
+            return CandidacyStatus.Ineligible;
+        } else {
+            return CandidacyStatus.Eligible;
+        }
+    }
+
 
 }

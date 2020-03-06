@@ -191,7 +191,6 @@ public class ProgressSet {
 
     }
 
-
     /// Returns the Candidate's eligibility in the current election.
     ///
     /// If it is still eligible, it should continue polling nodes and checking.
@@ -210,5 +209,25 @@ public class ProgressSet {
         }
     }
 
+    /// Determines if the current quorum is active according to the this raft node.
+    /// Doing this will set the `recent_active` of each peer to false.
+    ///
+    /// This should only be called by the leader.
+    public boolean quorumRecentlyActive(long perspectiveOf, QuorumFunction qf) {
+        var active = this.voters()
+                .entrySet()
+                .stream()
+                .filter(s -> s.getKey() == perspectiveOf || s.getValue().isRecentActive())
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toSet());
+
+        this.progress.forEach((k, v) -> v.setRecentActive(false));
+
+        return this.configuration.hasQuorum(active, qf);
+    }
+
+    public boolean hasQuorum(Set<Long> potentialQuorum, QuorumFunction qf) {
+        return this.configuration.hasQuorum(potentialQuorum, qf);
+    }
 
 }

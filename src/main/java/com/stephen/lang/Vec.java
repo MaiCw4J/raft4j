@@ -2,8 +2,17 @@ package com.stephen.lang;
 
 
 import java.util.ArrayList;
+import java.util.Collection;
 
 public class Vec<E> extends ArrayList<E> {
+
+    public Vec() {
+        super();
+    }
+
+    public Vec(Collection<? extends E> c) {
+        super(c);
+    }
 
     public void truncate(int limit) {
         removeRange(limit, this.size());

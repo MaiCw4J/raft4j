@@ -3,6 +3,7 @@ package com.stephen;
 import com.stephen.exception.PanicException;
 import com.stephen.exception.RaftError;
 import com.stephen.exception.RaftErrorException;
+import com.stephen.lang.Vec;
 import eraftpb.Eraftpb;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -340,6 +341,28 @@ public class RaftLog {
                 meta.getTerm());
         this.committed = meta.getIndex();
         this.unstable.restore(snapshot);
+    }
+
+    public Vec<Eraftpb.Entry> nextEntriesSince(long sinceIdx) {
+        long offset = Math.max(sinceIdx + 1, this.firstIndex());
+        long committed = this.committed;
+        if (committed + 1 > offset) {
+            try {
+                return (Vec<Eraftpb.Entry>) this.slice(offset, committed + 1, null);
+            } catch (RaftErrorException e) {
+                throw new PanicException(log, "{}", e);
+            }
+        }
+        return null;
+    }
+
+    public Vec<Eraftpb.Entry> nextEntries() {
+        return this.nextEntriesSince(this.applied);
+    }
+
+    /// Snaps the unstable up to a current index.
+    public void stableSnapTo(long idx) {
+        this.unstable.stableSnapTo(idx);
     }
 
 }

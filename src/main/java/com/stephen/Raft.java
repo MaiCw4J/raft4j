@@ -7,6 +7,7 @@ import com.stephen.constanst.StateRole;
 import com.stephen.exception.PanicException;
 import com.stephen.exception.RaftError;
 import com.stephen.exception.RaftErrorException;
+import com.stephen.lang.Vec;
 import com.stephen.progress.Progress;
 import com.stephen.progress.ProgressSet;
 import com.stephen.raft.SoftState;
@@ -79,7 +80,7 @@ public class Raft  {
     private Map<Long, Boolean> votes;
 
     /// The list of messages.
-    private List<Eraftpb.Message> msgs;
+    private Vec<Eraftpb.Message> msgs;
 
     /// The leader id
     private long leaderId;
@@ -1300,4 +1301,21 @@ public class Raft  {
         return new SoftState(this.leaderId, this.state);
     }
 
+    public void commitApply(long applied) {
+        
+    }
+
+    public void ping() {
+        
+    }
+
+    public void addNode(long nid) {
+        
+    }
+
+    public void addLearner(long nid)
+    }
+
+    public void removeNode(long nid) {
+    }
 }

@@ -26,7 +26,7 @@ import static eraftpb.Eraftpb.MessageType.*;
 @SuppressWarnings("StatementWithEmptyBody")
 @Slf4j
 @Data
-public class Raft  {
+public class Raft {
 
     // CAMPAIGN_PRE_ELECTION represents the first phase of a normal election when
     // Config.pre_vote is true.
@@ -726,7 +726,8 @@ public class Raft  {
                         }
                     }
                     case Ineligible -> this.becomeFollower(this.term, INVALID_ID);
-                    case Eligible -> {}
+                    case Eligible -> {
+                    }
                 }
             }
             case MsgTimeoutNow -> {
@@ -1205,7 +1206,7 @@ public class Raft  {
         // Do not fast-forward commit if we are requesting snapshot.
         if (this.pendingRequestSnapshot == INVALID_INDEX && this.raftLog.matchTerm(meta.getIndex(), meta.getTerm())) {
             log.info("[commit: {}, lastIndex: {}, lastTerm: {}] " +
-                    "fast-forwarded commit to snapshot [index: {}, term: {}]",
+                            "fast-forwarded commit to snapshot [index: {}, term: {}]",
                     this.raftLog.getCommitted(),
                     this.raftLog.lastIndex(),
                     this.raftLog.lastTerm(),
@@ -1302,35 +1303,89 @@ public class Raft  {
     }
 
     public void commitApply(long applied) {
-        
+        this.getRaftLog().appliedTo(applied);
     }
 
     public void ping() {
-        
+        if (this.state == StateRole.Leader) {
+            this.bcastHeartbeat();
+        }
     }
 
-    public void addNode(long nid) {
-        
+    public void addNode(long nid) throws RaftErrorException {
+        this.addVoterOrLearner(id, false);
     }
 
-    public void addLearner(long nid)
+    private void addVoterOrLearner(long id, boolean learner) throws RaftErrorException {
+        log.debug("adding node (learner: {}) with ID {} to peers.", learner, id);
+
+        if (learner) {
+            this.getPrs().insertLearner(id, new Progress(this.getRaftLog().lastIndex() + 1, this.maxInflight));
+        } else if (this.prs.learnerIds().contains(id)) {
+            this.getPrs().promoteLearner(id);
+        } else {
+            this.getPrs().insertVoter(id, new Progress(this.getRaftLog().lastIndex() + 1, this.maxInflight));
+        }
+
+        if (this.id == id) {
+            this.promotable = !learner;
+        }
+        // When a node is first added/promoted, we should mark it as recently active.
+        // Otherwise, check_quorum may cause us to step down if it is invoked
+        // before the added node has a chance to communicate with us.
+        this.getPrs().get(id).setRecentActive(true);
+    }
+
+    public void addLearner(long nid) throws RaftErrorException {
+        this.addVoterOrLearner(id, true);
     }
 
     public void removeNode(long nid) {
+        this.getPrs().remove(id);
+
+        // do not try to commit or abort transferring if there are no voters in the cluster.
+        if (this.prs.voterIds().isEmpty()) {
+            return;
+        }
+
+        // The quorum size is now smaller, so see if any pending entries can
+        // be committed.
+        if (this.maybeCommit()) {
+            this.bcastAppend();
+        }
+        // If the removed node is the lead_transferee, then abort the leadership transferring.
+        if (this.state == StateRole.Leader && this.leadTransferee == id) {
+            this.abortLeaderTransfer();
+            ;
+        }
     }
 
     public Eraftpb.Snapshot snap() {
+        return this.getRaftLog().getUnstable().getSnapshot();
     }
 
-    public void requestSnapshot(long requestIndex) {
+    public void requestSnapshot(long requestIndex) throws RaftErrorException {
+        if (this.state == StateRole.Leader) {
+            log.info("can not request snapshot on leader; dropping request snapshot");
+        } else if (this.leaderId == INVALID_ID) {
+            log.info("drop request snapshot because of no leader");
+        } else if (this.snap() != null) {
+            log.info("there is a pending snapshot; dropping request snapshot");
+        } else if (this.pendingRequestSnapshot != INVALID_INDEX) {
+            log.info("there is a pending snapshot; dropping request snapshot");
+        } else {
+            this.pendingRequestSnapshot = requestIndex;
+            this.sendRequestSnapshot();
+        }
+        throw new RaftErrorException(RaftError.RequestSnapshotDropped);
     }
 
     public Storage store() {
+        return this.getRaftLog().getStore();
     }
 
     public Storage mutStore() {
+        return this.getRaftLog().getStore();
     }
-
-    public void skipBcastCommit(boolean skip) {
-    }
+    
 }

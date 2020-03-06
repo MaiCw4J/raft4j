@@ -230,4 +230,31 @@ public class ProgressSet {
         return this.configuration.hasQuorum(potentialQuorum, qf);
     }
 
+    public void insertLearner(long id, Progress pr) throws RaftErrorException {
+        log.debug("Inserting learner with id {}", id);
+
+        if (this.learnerIds().contains(id)) {
+            throw new RaftErrorException(RaftError.Exists, "learners");
+        } else if (this.voterIds().contains(id)) {
+            throw new RaftErrorException(RaftError.Exists, "voters");
+        }
+
+        this.configuration.getLearners().add(id);
+        this.progress.put(id, pr);
+        this.assertProgressAndConfigurationConsistent();
+    }
+
+    public void insertVoter(long id, Progress pr) throws RaftErrorException {
+        log.debug("Inserting voter with id {}", id);
+
+        if (this.learnerIds().contains(id)) {
+            throw new RaftErrorException(RaftError.Exists, "learners");
+        } else if (this.voterIds().contains(id)) {
+            throw new RaftErrorException(RaftError.Exists, "voters");
+        }
+
+        this.configuration.getVoters().add(id);
+        this.progress.put(id, pr);
+        this.assertProgressAndConfigurationConsistent();
+    }
 }

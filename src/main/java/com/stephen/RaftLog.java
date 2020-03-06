@@ -235,10 +235,10 @@ public class RaftLog {
     }
 
     /// Returns entries starting from a particular index and not exceeding a bytesize.
-    public List<Eraftpb.Entry> entries(long idx, long maxSize) throws RaftErrorException {
+    public Vec<Eraftpb.Entry> entries(long idx, long maxSize) throws RaftErrorException {
         var last = this.lastIndex();
         if (idx > last) {
-            return List.of();
+            return new Vec<>();
         }
         return this.slice(idx, last + 1, maxSize);
     }
@@ -278,12 +278,8 @@ public class RaftLog {
             }
         }
 
-        var limit = $.limitSize(entries, maxSize);
-        if (limit != null) {
-            return entries.subList(0, limit.intValue());
-        } else {
-            return entries;
-        }
+        $.limitSize(entries, maxSize);
+        return entries;
     }
 
     private void mustCheckOutOfBounds(long low, long high) throws RaftErrorException {
@@ -365,9 +361,21 @@ public class RaftLog {
         this.unstable.stableSnapTo(idx);
     }
 
-    public boolean hasNextEntriesSince(Long idx) {
+    public boolean hasNextEntriesSince(Long sinceIdx) {
+        return this.committed + 1 > Math.max(sinceIdx + 1, this.firstIndex());
     }
 
     public boolean hasNextEntries() {
+        return this.hasNextEntriesSince(this.applied);
+    }
+
+    public void appliedTo(long idx) {
+        if (idx == 0) {
+            return;
+        }
+        if (this.committed < idx || idx < this.applied) {
+            throw new PanicException(log, " applied({}) is out of range [prev_applied({}), committed({}) ", idx, this.applied, this.committed);
+        }
+        this.applied = idx;
     }
 }

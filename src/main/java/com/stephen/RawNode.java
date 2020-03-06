@@ -126,7 +126,7 @@ public class RawNode {
     /**
      * Takes the conf change and applies it.
      */
-    public Eraftpb.ConfState applyConfChange(Eraftpb.ConfChange cc) {
+    public Eraftpb.ConfState applyConfChange(Eraftpb.ConfChange cc) throws RaftErrorException {
         if (cc.getNodeId() == INVALID_ID) {
             return Eraftpb.ConfState.getDefaultInstance()
                     .toBuilder()
@@ -288,7 +288,7 @@ public class RawNode {
      * Request a snapshot from a leader.
      * The snapshot's index must be greater or equal to the request_index.
      */
-    public void requestSnapshot(long requestIndex) {
+    public void requestSnapshot(long requestIndex) throws RaftErrorException {
         this.raft.requestSnapshot(requestIndex);
     }
 
@@ -337,8 +337,8 @@ public class RawNode {
     /**
      * Set whether skip broadcast empty commit messages at runtime.
      */
-    public void skipBcastCommit(boolean skip) {
-        this.raft.skipBcastCommit(skip);
+    public void skipBCastCommit(boolean skip) {
+        this.raft.setSkipBCastCommit(skip);
     }
 
     public void setBatchAppend(boolean batchAppend) {

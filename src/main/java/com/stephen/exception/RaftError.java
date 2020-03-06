@@ -35,8 +35,12 @@ public enum RaftError {
     /// The snapshot is being created.
     Storage_SnapshotTemporarilyUnavailable("snapshot is temporarily unavailable"),
 
+    RequestSnapshotDropped(""),
+
     /// Some other error occurred.
     Storage_Other("unknown error");
+
+
 
     RaftError(String description) {
         this.description = description;
@@ -44,5 +48,6 @@ public enum RaftError {
 
     @Getter
     private String description;
+
 
 }

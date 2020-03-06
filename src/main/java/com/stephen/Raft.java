@@ -1318,4 +1318,19 @@ public class Raft  {
 
     public void removeNode(long nid) {
     }
+
+    public Eraftpb.Snapshot snap() {
+    }
+
+    public void requestSnapshot(long requestIndex) {
+    }
+
+    public Storage store() {
+    }
+
+    public Storage mutStore() {
+    }
+
+    public void skipBcastCommit(boolean skip) {
+    }
 }

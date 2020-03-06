@@ -1,17 +1,20 @@
 package com.stephen;
 
 import com.google.protobuf.ByteString;
+import com.stephen.constanst.SnapshotStatus;
 import com.stephen.exception.RaftError;
 import com.stephen.exception.RaftErrorException;
 import com.stephen.lang.Vec;
 import com.stephen.raft.Ready;
 import com.stephen.raft.SoftState;
+import com.stephen.raft.StatusRef;
 import eraftpb.Eraftpb;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.Set;
 
 import static com.stephen.constanst.Globals.INVALID_ID;
@@ -167,5 +170,178 @@ public class RawNode {
             case MsgHup, MsgBeat, MsgUnreachable, MsgSnapStatus, MsgCheckQuorum -> true;
             default -> false;
         };
+    }
+
+    /**
+     * Given an index, creates a new Ready value from that index.
+     */
+    public Ready readySince(long appliedIdx) {
+        return new Ready(this.raft, this.prevSs, this.prevHs, appliedIdx);
+    }
+
+    /**
+     * Ready returns the current point-in-time state of this RawNode.
+     */
+    public Ready ready() {
+        return new Ready(this.raft, this.prevSs, this.prevHs, null);
+    }
+
+    /**
+     * HasReady called when RawNode user need to check if any Ready pending.
+     * Checking logic in this method should be consistent with Ready.containsUpdates()
+     */
+    public boolean hasReady() {
+        return this.hasReadySince(null);
+    }
+
+    /**
+     * Given an index, can determine if there is a ready state from that time.
+     */
+    public boolean hasReadySince(Long appliedIdx) {
+        Raft raft = this.raft;
+        if (!raft.getMsgs().isEmpty() || raft.getRaftLog().unstableEntries() != null) {
+            return true;
+        }
+        if (!raft.getReadStates().isEmpty()) {
+            return true;
+        }
+        if (isEmptySnap(this.snap())) {
+            return true;
+        }
+        if (Optional.ofNullable(appliedIdx)
+                .map(idx -> raft.getRaftLog().hasNextEntriesSince(idx))
+                .orElse(raft.getRaftLog().hasNextEntries())) {
+            return true;
+        }
+        if (raft.softState() != this.prevSs) {
+            return true;
+        }
+        Eraftpb.HardState hs = raft.hardState();
+        return hs != Eraftpb.HardState.getDefaultInstance() && hs != this.prevHs;
+    }
+
+    public Eraftpb.Snapshot snap() {
+        return this.raft.snap();
+    }
+
+    /**
+     * For a given snapshot, determine if it's empty or not.
+     */
+    public boolean isEmptySnap(Eraftpb.Snapshot s) {
+        return s.getMetadata().getIndex() == 0;
+    }
+
+    /**
+     * Appends and commits the ready value.
+     */
+    public void advanceAppend(Ready rd) {
+        this.commitReady(rd);
+    }
+
+    /**
+     * Advance apply to the passed index.
+     */
+    public void advanceApply(long applied) {
+        this.commitApply(applied);
+    }
+
+    /**
+     * Status returns the current status of the given group.
+     */
+    public Status status() {
+        return new Status(this.raft);
+    }
+
+    /**
+     * Returns the current status of the given group.
+     * It's borrows the internal progress set instead of copying.
+     */
+    public StatusRef statusRef() {
+        return new StatusRef(this.raft);
+    }
+
+    /**
+     * ReportUnreachable reports the given node is not reachable for the last send.
+     */
+    public void reportUnreachable(long id) throws RaftErrorException {
+        this.raft.step(Eraftpb.Message.getDefaultInstance()
+                .toBuilder()
+                .setMsgType(Eraftpb.MessageType.MsgUnreachable)
+                .setFrom(id)
+                .build());
+    }
+
+    /**
+     * ReportSnapshot reports the status of the sent snapshot.
+     */
+    public void reportSnapshot(long id, SnapshotStatus status) throws RaftErrorException {
+        boolean rej = status == SnapshotStatus.Failure;
+        this.raft.step(Eraftpb.Message.getDefaultInstance()
+                .toBuilder()
+                .setMsgType(Eraftpb.MessageType.MsgSnapStatus)
+                .setFrom(id)
+                .setReject(rej)
+                .build());
+    }
+
+    /**
+     * Request a snapshot from a leader.
+     * The snapshot's index must be greater or equal to the request_index.
+     */
+    public void requestSnapshot(long requestIndex) {
+        this.raft.requestSnapshot(requestIndex);
+    }
+
+    /**
+     * TransferLeader tries to transfer leadership to the given transferee.
+     */
+    public void transferLeader(long transferee) throws RaftErrorException {
+        this.raft.step(Eraftpb.Message.getDefaultInstance()
+                .toBuilder()
+                .setMsgType(Eraftpb.MessageType.MsgTransferLeader)
+                .setFrom(transferee)
+                .build());
+    }
+
+    /**
+     * ReadIndex requests a read state. The read state will be set in ready.
+     * Read State has a read index. Once the application advances further than the read
+     * index, any linearizable read requests issued before the read request can be
+     * processed safely. The read state will have the same rctx attached.
+     */
+    public void readIndex(ByteString rctx) throws RaftErrorException {
+        this.raft.step(Eraftpb.Message.getDefaultInstance()
+                .toBuilder()
+                .setMsgType(Eraftpb.MessageType.MsgReadIndex)
+                .addEntries(Eraftpb.Entry.getDefaultInstance()
+                        .toBuilder()
+                        .setData(rctx))
+                .build());
+    }
+
+    /**
+     * Returns the store as an immutable reference.
+     */
+    public Storage store() {
+        return this.raft.store();
+    }
+
+
+    /**
+     * Returns the store as a mutable reference.
+     */
+    public Storage mutStore() {
+        return this.raft.mutStore();
+    }
+
+    /**
+     * Set whether skip broadcast empty commit messages at runtime.
+     */
+    public void skipBcastCommit(boolean skip) {
+        this.raft.skipBcastCommit(skip);
+    }
+
+    public void setBatchAppend(boolean batchAppend) {
+        this.raft.setBatchAppend(batchAppend);
     }
 }

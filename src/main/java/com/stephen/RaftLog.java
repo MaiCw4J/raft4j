@@ -365,4 +365,9 @@ public class RaftLog {
         this.unstable.stableSnapTo(idx);
     }
 
+    public boolean hasNextEntriesSince(Long idx) {
+    }
+
+    public boolean hasNextEntries() {
+    }
 }

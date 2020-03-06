@@ -1,6 +1,7 @@
 package com.stephen;
 
 import com.stephen.exception.RaftErrorException;
+import com.stephen.lang.Vec;
 import eraftpb.Eraftpb;
 
 import java.util.List;
@@ -24,7 +25,7 @@ public interface Storage {
     /// # Panics
     ///
     /// Panics if `high` is higher than `Storage::last_index(&self) + 1`.
-    List<Eraftpb.Entry> entries(long low, long high, Long maxSize) throws RaftErrorException;
+    Vec<Eraftpb.Entry> entries(long low, long high, Long maxSize) throws RaftErrorException;
 //    fn entries(&self, low: u64, high: u64, max_size: impl Into<Option<u64>>) -> Result<Vec<Entry>>;
 
     /// Returns the term of entry idx, which must be in the range

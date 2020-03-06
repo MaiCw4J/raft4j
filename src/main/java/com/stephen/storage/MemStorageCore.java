@@ -40,13 +40,17 @@ public class MemStorageCore {
         return !this.entries.isEmpty() && index >= this.firstIndex() && index <= this.lastIndex();
     }
 
-    private long firstIndex() {
+    long firstIndex() {
         Eraftpb.Entry entry = this.entries.stream().findFirst().orElse(null);
         return entry == null ? this.snapshotMetadata.getIndex() + 1 : entry.getIndex();
     }
 
-    private long lastIndex() {
+    long lastIndex() {
         Eraftpb.Entry entry = this.entries.stream().limit(this.entries.size() - 1).findFirst().orElse(null);
         return entry == null ? this.snapshotMetadata.getIndex() : entry.getIndex();
+    }
+
+    public Eraftpb.Snapshot snapshot() {
+        return null;
     }
 }

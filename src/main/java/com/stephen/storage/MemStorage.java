@@ -89,7 +89,7 @@ public class MemStorage implements Storage {
      * 返回range（log，high）的日志条目，maxSize为最大条目数
      */
     @Override
-    public List<Eraftpb.Entry> entries(long low, long high, Long maxSize) throws RaftErrorException {
+    public Vec<Eraftpb.Entry> entries(long low, long high, Long maxSize) throws RaftErrorException {
         MemStorageCore core = rl();
         if (low < core.firstIndex()) {
             throw new RaftErrorException(RaftError.Storage_Compacted);

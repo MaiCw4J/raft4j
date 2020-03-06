@@ -245,14 +245,14 @@ public class RaftLog {
 
     /// Grabs a slice of entries from the raft. Unlike a rust slice pointer, these are
     /// returned by value. The result is truncated to the max_size in bytes.
-    public List<Eraftpb.Entry> slice(long low, long high, Long maxSize) throws RaftErrorException {
+    public Vec<Eraftpb.Entry> slice(long low, long high, Long maxSize) throws RaftErrorException {
         this.mustCheckOutOfBounds(low, high);
 
         if (low == high) {
-            return List.of();
+            return new Vec<>();
         }
 
-        List<Eraftpb.Entry> entries = new ArrayList<>();
+        Vec<Eraftpb.Entry> entries = new Vec<>();
         var offset = this.unstable.getOffset();
         if (low < offset) {
             var unstableHigh = Math.min(high, offset);

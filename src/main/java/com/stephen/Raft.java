@@ -3,7 +3,9 @@ package com.stephen;
 import com.stephen.constanst.StateRole;
 import com.stephen.exception.PanicException;
 import com.stephen.progress.ProgressSet;
+import com.stephen.raft.SoftState;
 import eraftpb.Eraftpb;
+import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
@@ -12,6 +14,7 @@ import java.util.Map;
 import static eraftpb.Eraftpb.MessageType.*;
 
 @Slf4j
+@Data
 public class Raft {
 
     /// The current election term.
@@ -185,4 +188,17 @@ public class Raft {
         this.msgs.add(message);
     }
 
+    public Eraftpb.HardState hardState() {
+        return Eraftpb.HardState.getDefaultInstance()
+                .toBuilder()
+                .setTerm(this.term)
+                .setVote(this.vote)
+                .setCommit(this.raftLog.getCommitted())
+                .build();
+
+    }
+
+    public SoftState softState() {
+        return new SoftState(this.leaderId, this.state);
+    }
 }

@@ -47,6 +47,7 @@ public class Progress implements Cloneable {
     /// This is true if the progress is recently active. Receiving any messages
     /// from the corresponding follower indicates the progress is active.
     /// RecentActive can be reset to false after an election timeout.
+    @Setter
     private boolean recentActive;
 
     /// Inflights is a sliding window for the inflight messages.

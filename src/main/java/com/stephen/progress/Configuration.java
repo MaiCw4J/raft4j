@@ -64,7 +64,7 @@ public class Configuration {
 
     }
 
-    private boolean hasQuorum(Set<Long> potentialQuorum, QuorumFunction qf) {
+    public boolean hasQuorum(Set<Long> potentialQuorum, QuorumFunction qf) {
         int votersSize = this.voters.size();
         var quorum = QuorumUtils.calculateQuorum(qf, votersSize);
 

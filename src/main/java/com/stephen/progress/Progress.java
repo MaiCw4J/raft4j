@@ -3,12 +3,14 @@ package com.stephen.progress;
 import com.stephen.constanst.ProgressState;
 import com.stephen.exception.PanicException;
 import lombok.Getter;
+import lombok.Setter;
 
 import static com.stephen.constanst.Globals.INVALID_INDEX;
 
 @Getter
 public class Progress implements Cloneable {
     /// How much state is matched.
+    @Setter
     private long matched;
 
     /// The next index to apply
@@ -45,6 +47,7 @@ public class Progress implements Cloneable {
     /// This is true if the progress is recently active. Receiving any messages
     /// from the corresponding follower indicates the progress is active.
     /// RecentActive can be reset to false after an election timeout.
+    @Setter
     private boolean recentActive;
 
     /// Inflights is a sliding window for the inflight messages.

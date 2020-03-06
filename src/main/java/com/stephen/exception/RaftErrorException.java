@@ -22,8 +22,4 @@ public class RaftErrorException extends Exception {
         this.error = error;
     }
 
-    public PanicException panic() {
-        return new PanicException(this);
-    }
-
 }

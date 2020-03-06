@@ -1,11 +1,14 @@
 package com.stephen;
 
 import com.stephen.exception.PanicException;
+import com.stephen.exception.RaftError;
 import com.stephen.exception.RaftErrorException;
+import com.stephen.lang.Vec;
 import eraftpb.Eraftpb;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -85,7 +88,7 @@ public class RaftLog {
             try {
                 return this.store.firstIndex();
             } catch (RaftErrorException e) {
-                throw e.panic();
+                throw new PanicException(e);
             }
         });
     }
@@ -101,7 +104,7 @@ public class RaftLog {
             try {
                 return this.store.lastIndex();
             } catch (RaftErrorException e) {
-                throw e.panic();
+                throw new PanicException(e);
             }
         });
     }
@@ -152,7 +155,7 @@ public class RaftLog {
         }
     }
 
-    public void maybeAppend(long idx, long term, long committed, List<Eraftpb.Entry> entries) {
+    public Long maybeAppend(long idx, long term, long committed, List<Eraftpb.Entry> entries) {
         if (this.matchTerm(idx, term)) {
             var conflictIdx = this.findConflict(entries);
             if (conflictIdx != 0 && conflictIdx <= this.committed) {
@@ -160,10 +163,13 @@ public class RaftLog {
             } else {
                 var start = (int) (conflictIdx - idx + 1);
                 this.append(entries.subList(start, entries.size()));
-//                et start = (conflict_idx - (idx + 1)) as usize;
-//                self.append(&ents[start..]);
             }
+
+            var lastNewIndex = idx + entries.size();
+            this.commitTo(Math.min(committed, lastNewIndex));
+            return lastNewIndex;
         }
+        return null;
     }
 
     /// Sets the last committed value to the passed in value.
@@ -217,6 +223,146 @@ public class RaftLog {
             return null;
         }
         return entries;
+    }
+
+    /// Returns the current snapshot
+    public Eraftpb.Snapshot snapshot(long requestIndex) throws RaftErrorException {
+        var snapshot = this.unstable.getSnapshot();
+        if (snapshot != null && snapshot.getMetadata().getIndex() > requestIndex) {
+            return snapshot;
+        }
+        return this.store.snapshot(requestIndex);
+    }
+
+    /// Returns entries starting from a particular index and not exceeding a bytesize.
+    public List<Eraftpb.Entry> entries(long idx, long maxSize) throws RaftErrorException {
+        var last = this.lastIndex();
+        if (idx > last) {
+            return List.of();
+        }
+        return this.slice(idx, last + 1, maxSize);
+    }
+
+    /// Grabs a slice of entries from the raft. Unlike a rust slice pointer, these are
+    /// returned by value. The result is truncated to the max_size in bytes.
+    public List<Eraftpb.Entry> slice(long low, long high, Long maxSize) throws RaftErrorException {
+        this.mustCheckOutOfBounds(low, high);
+
+        if (low == high) {
+            return List.of();
+        }
+
+        List<Eraftpb.Entry> entries = new ArrayList<>();
+        var offset = this.unstable.getOffset();
+        if (low < offset) {
+            var unstableHigh = Math.min(high, offset);
+
+            try {
+                entries = this.store.entries(low, unstableHigh, maxSize);
+                if (entries.size() < unstableHigh - low) {
+                    return entries;
+                }
+            } catch (RaftErrorException e) {
+                switch (e.getError()) {
+                    case Storage_Compacted -> throw e;
+                    case Storage_Unavailable -> throw new PanicException(log, "entries[{}:{}] is unavailable from storage", low, unstableHigh);
+                    default -> throw new PanicException(log, e);
+                }
+            }
+        }
+
+        if (high > offset) {
+            var unstableEntries = this.unstable.slice(Math.max(low, offset), high);
+            if ($.isNotEmpty(unstableEntries)) {
+                entries.addAll(unstableEntries);
+            }
+        }
+
+        var limit = $.limitSize(entries, maxSize);
+        if (limit != null) {
+            return entries.subList(0, limit.intValue());
+        } else {
+            return entries;
+        }
+    }
+
+    private void mustCheckOutOfBounds(long low, long high) throws RaftErrorException {
+        if (low > high) {
+            throw new PanicException(log, "invalid slice {} > {}", low, high);
+        }
+
+        var firstIndex = this.firstIndex();
+        if (low < firstIndex) {
+            throw new RaftErrorException(RaftError.Storage_Compacted);
+        }
+
+        var lastIndex = this.lastIndex();
+        if (low < firstIndex || high > lastIndex + 1) {
+            throw new PanicException(log, "slice[{},{}] out of bound[{},{}]", low, high, firstIndex, lastIndex);
+        }
+    }
+
+    /// Attempts to commit the index and term and returns whether it did.
+    public boolean maybeCommit(long maxIndex, long term) {
+        long maxIndexTerm;
+        try {
+            maxIndexTerm = this.term(maxIndex);
+        } catch (RaftErrorException e) {
+            maxIndexTerm = 0;
+        }
+
+        if (maxIndex > this.committed && maxIndexTerm == term) {
+            if (log.isDebugEnabled()) {
+                log.debug("committing index {}", maxIndex);
+            }
+            this.commitTo(maxIndex);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    /// Determines if the given (lastIndex,term) log is more up-to-date
+    /// by comparing the index and term of the last entry in the existing logs.
+    /// If the logs have last entry with different terms, then the log with the
+    /// later term is more up-to-date. If the logs end with the same term, then
+    /// whichever log has the larger last_index is more up-to-date. If the logs are
+    /// the same, the given log is up-to-date.
+    public boolean isUpToDate(long lastIndex, long term) {
+        var lastTerm = this.lastTerm();
+        return term > lastTerm || (term == lastTerm && lastIndex >= this.lastIndex());
+    }
+
+    /// Restores the current log from a snapshot.
+    public void restore(Eraftpb.Snapshot snapshot) {
+        var meta = snapshot.getMetadata();
+        log.info("log unstable starts to restore snapshot [index: {}, term: {}]",
+                meta.getIndex(),
+                meta.getTerm());
+        this.committed = meta.getIndex();
+        this.unstable.restore(snapshot);
+    }
+
+    public Vec<Eraftpb.Entry> nextEntriesSince(long sinceIdx) {
+        long offset = Math.max(sinceIdx + 1, this.firstIndex());
+        long committed = this.committed;
+        if (committed + 1 > offset) {
+            try {
+                return (Vec<Eraftpb.Entry>) this.slice(offset, committed + 1, null);
+            } catch (RaftErrorException e) {
+                throw new PanicException(log, "{}", e);
+            }
+        }
+        return null;
+    }
+
+    public Vec<Eraftpb.Entry> nextEntries() {
+        return this.nextEntriesSince(this.applied);
+    }
+
+    /// Snaps the unstable up to a current index.
+    public void stableSnapTo(long idx) {
+        this.unstable.stableSnapTo(idx);
     }
 
 }

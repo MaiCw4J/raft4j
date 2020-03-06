@@ -1,10 +1,13 @@
 package com.stephen;
 
+import com.stephen.exception.RaftErrorException;
 import eraftpb.Eraftpb;
 
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
+
 import com.stephen.lang.Vec;
 
 public class $ {
@@ -30,6 +33,14 @@ public class $ {
                 .count();
         entries.truncate(limit);
         return limit;
+    }
+
+    public static <T> T unwrap(CheckExceptionFunction<T>  supplier, T defaultValue) {
+        try {
+            return supplier.get();
+        } catch (RaftErrorException e) {
+            return defaultValue;
+        }
     }
 
     public static <VALUE> boolean isEmpty(Collection<VALUE> collection) {

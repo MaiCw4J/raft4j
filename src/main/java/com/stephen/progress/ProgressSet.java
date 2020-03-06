@@ -2,17 +2,20 @@ package com.stephen.progress;
 
 import com.stephen.QuorumFunction;
 import com.stephen.QuorumUtils;
+import com.stephen.constanst.CandidacyStatus;
 import com.stephen.constanst.ProgressRole;
 import com.stephen.exception.PanicException;
 import com.stephen.exception.RaftError;
 import com.stephen.exception.RaftErrorException;
 import eraftpb.Eraftpb;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
 @Slf4j
+@Getter
 public class ProgressSet {
 
     private Map<Long, Progress> progress;
@@ -186,6 +189,45 @@ public class ProgressSet {
 
         return matched.get(quorum);
 
+    }
+
+    /// Returns the Candidate's eligibility in the current election.
+    ///
+    /// If it is still eligible, it should continue polling nodes and checking.
+    /// Eventually, the election will result in this returning either `Elected`
+    /// or `Ineligible`, meaning the election can be concluded.
+    public CandidacyStatus candidacyStatus(Map<Long, Boolean> votes, QuorumFunction quorumFunction) {
+        var partitioningMap = votes.entrySet().stream()
+                .collect(Collectors.partitioningBy(Map.Entry::getValue, Collectors.mapping(Map.Entry::getKey, Collectors.toSet())));
+
+        if (this.configuration.hasQuorum(partitioningMap.get(true), quorumFunction)) {
+            return CandidacyStatus.Elected;
+        } else if (this.configuration.hasQuorum(partitioningMap.get(false), quorumFunction)) {
+            return CandidacyStatus.Ineligible;
+        } else {
+            return CandidacyStatus.Eligible;
+        }
+    }
+
+    /// Determines if the current quorum is active according to the this raft node.
+    /// Doing this will set the `recent_active` of each peer to false.
+    ///
+    /// This should only be called by the leader.
+    public boolean quorumRecentlyActive(long perspectiveOf, QuorumFunction qf) {
+        var active = this.voters()
+                .entrySet()
+                .stream()
+                .filter(s -> s.getKey() == perspectiveOf || s.getValue().isRecentActive())
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toSet());
+
+        this.progress.forEach((k, v) -> v.setRecentActive(false));
+
+        return this.configuration.hasQuorum(active, qf);
+    }
+
+    public boolean hasQuorum(Set<Long> potentialQuorum, QuorumFunction qf) {
+        return this.configuration.hasQuorum(potentialQuorum, qf);
     }
 
 }

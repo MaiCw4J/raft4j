@@ -74,6 +74,10 @@ public class MemStorage implements Storage {
     }
 
 
+    /**
+     * Raft初始化时调用
+     * RaftState包含  HardState（index，term） 、ConfState（当前所有节点）
+     */
     @Override
     public RaftState initialState() {
         RaftState raftState = this.rl().getRaftState();
@@ -82,7 +86,7 @@ public class MemStorage implements Storage {
     }
 
     /**
-     * Implements the Storage trait.
+     * 返回range（log，high）的日志条目，maxSize为最大条目数
      */
     @Override
     public List<Eraftpb.Entry> entries(long low, long high, Long maxSize) throws RaftErrorException {
@@ -137,6 +141,9 @@ public class MemStorage implements Storage {
         return rl().lastIndex();
     }
 
+    /**
+     * 返回最新的快照
+     */
     @Override
     public Eraftpb.Snapshot snapshot(long requestIndex) throws RaftErrorException {
         AtomicBoolean flag = new AtomicBoolean(false);

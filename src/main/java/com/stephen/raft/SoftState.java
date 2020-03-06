@@ -12,4 +12,7 @@ public class SoftState {
 
     private StateRole raftState;
 
+    public SoftState() {
+        this(0,StateRole.Follower);
+    }
 }

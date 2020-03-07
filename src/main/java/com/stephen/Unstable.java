@@ -1,11 +1,11 @@
 package com.stephen;
 
 import com.stephen.exception.PanicException;
+import com.stephen.lang.Vec;
 import eraftpb.Eraftpb;
 import lombok.Data;
 import lombok.NonNull;
 
-import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -15,7 +15,7 @@ public class Unstable {
     private Eraftpb.Snapshot snapshot;
 
     /// All entries that have not yet been written to storage.
-    private List<Eraftpb.Entry> entries;
+    private Vec<Eraftpb.Entry> entries;
 
     /// The offset from the vector index.
     private long offset;
@@ -23,7 +23,7 @@ public class Unstable {
     /// Creates a new log of unstable entries.
     public Unstable(long offset) {
         this.offset = offset;
-        this.entries = new ArrayList<>();
+        this.entries = new Vec<>();
     }
 
     /// Returns the index of the first possible entry in entries
@@ -81,7 +81,7 @@ public class Unstable {
 
         if (maybeTerm == term && idx >= this.offset) {
             var start = idx + 1 - this.offset;
-            this.drain((int)start);
+            this.entries.drain(0,(int)start);
             this.offset = idx + 1;
         }
     }
@@ -120,7 +120,7 @@ public class Unstable {
             // truncate to after and copy to self.entries then append
             var offset = this.offset;
             this.mustCheckOutOfBounds(offset, after);
-            this.truncate((int)(after - offset));
+            this.entries.truncate((int)(after - offset));
             this.entries.addAll(entries);
         }
     }
@@ -149,15 +149,5 @@ public class Unstable {
             throw new PanicException(String.format("unstable.slice[%d, %d] out of bound[%d, %d]", low, high, this.offset, upper));
         }
     }
-
-    private void drain(int index) {
-        var entries = this.entries;
-        this.entries = new ArrayList<>(entries.subList(index, entries.size()));
-    }
-
-    private void truncate(int index) {
-        this.entries = new ArrayList<>(this.entries.subList(0, index));
-    }
-
-
+    
 }

@@ -118,7 +118,7 @@ public class Raft {
     /// Whether to check the quorum
     private boolean checkQuorum;
 
-    /// Enable the prevote algorithm.
+    /// Enable the pre vote algorithm.
     ///
     /// This enables a pre-election vote round on Candidates prior to disrupting the cluster.
     ///
@@ -139,10 +139,6 @@ public class Raft {
     private int max_electionTimeout;
 
     private QuorumFunction quorumFunction;
-
-    private Eraftpb.Message newMessage(long to, Eraftpb.MessageType fieldType, Long from) {
-        return newMessageBuilder(to, fieldType, from).build();
-    }
 
     private Eraftpb.Message.Builder newMessageBuilder(long to, Eraftpb.MessageType fieldType, Long from) {
         var builder = Eraftpb.Message.newBuilder()
@@ -338,7 +334,6 @@ public class Raft {
         return true;
     }
 
-
     /// Returns true to indicate that there will probably be some readiness need to be handled.
     public boolean tick() {
         return switch (this.state) {
@@ -358,9 +353,11 @@ public class Raft {
         }
 
         this.electionElapsed = 0;
-        var msg = newMessage(INVALID_ID, MsgHup, this.id);
-
-//        let _ = self.step(m);
+        var toSend = newMessageBuilder(INVALID_ID, MsgHup, this.id);
+        try {
+            this.step(toSend);
+        } catch (RaftErrorException ignored) {
+        }
         return true;
     }
 
@@ -374,9 +371,12 @@ public class Raft {
         if (this.electionElapsed >= this.electionTimeout) {
             this.electionElapsed = 0;
             if (this.checkQuorum) {
-                var quorumMsg = newMessage(INVALID_ID, MsgCheckQuorum, this.id);
+                var quorumMsg = newMessageBuilder(INVALID_ID, MsgCheckQuorum, this.id);
                 hasReady = true;
-//                let _ = self.step(m);
+                try {
+                    this.step(quorumMsg);
+                } catch (RaftErrorException ignored) {
+                }
             }
             if (this.state == StateRole.Leader && this.leadTransferee != null) {
                 this.abortLeaderTransfer();
@@ -390,8 +390,11 @@ public class Raft {
         if (this.heartbeatElapsed > this.heartbeatTimeout) {
             this.heartbeatElapsed = 0;
             hasReady = true;
-            var beatMsg = newMessage(INVALID_ID, MsgBeat, this.id);
-//            let _ = self.step(m);
+            var beatMsg = newMessageBuilder(INVALID_ID, MsgBeat, this.id);
+            try {
+                this.step(beatMsg);
+            } catch (RaftErrorException ignored) {
+            }
         }
         return hasReady;
     }
@@ -409,7 +412,7 @@ public class Raft {
 
     /// Steps the raft along via a message. This should be called every time your raft receives a
     /// message from a peer.
-    public void step(Eraftpb.Message m) throws RaftErrorException {
+    public void step(Eraftpb.Message.Builder m) throws RaftErrorException {
         var msgType = m.getMsgType();
         // Handle the message term, which may result in our stepping down to a follower.
         if (m.getTerm() == 0) {
@@ -566,19 +569,17 @@ public class Raft {
                     this.send(resp);
                 }
             }
-            default -> stepState(m);
+            default -> {
+                switch (this.state) {
+                    case Candidate, PreCandidate -> this.stepCandidate(m);
+                    case Follower -> this.stepFollower(m);
+                    case Leader -> this.stepLeader(m);
+                }
+            }
         }
     }
 
-    private void stepState(Eraftpb.Message m) throws RaftErrorException {
-        switch (this.state) {
-            case Candidate, PreCandidate -> this.stepCandidate(m);
-            case Follower -> this.stepFollower(m);
-            case Leader -> this.stepLeader(m);
-        }
-    }
-
-    private void stepLeader(Eraftpb.Message m) throws RaftErrorException {
+    private void stepLeader(Eraftpb.Message.Builder m) throws RaftErrorException {
         switch (m.getMsgType()) {
             case MsgBeat -> {
                 this.bcastAppend();
@@ -623,7 +624,12 @@ public class Raft {
                 }
             }
             case MsgReadIndex -> {
-                long term = $.unwrap(() -> this.raftLog.term(this.raftLog.getCommitted()), (long) 0);
+                long term;
+                try {
+                    term = this.raftLog.term(this.raftLog.getCommitted());
+                } catch (RaftErrorException e) {
+                    term = 0;
+                }
                 if (term != this.term) {
                     // Reject read only request when this leader has not committed any log entry
                     // in its term.
@@ -637,7 +643,7 @@ public class Raft {
                     // This would allow multiple reads to piggyback on the same message.
                     switch (this.readOnly.getOption()) {
                         case Safe -> {
-                            this.readOnly.addRequest(this.raftLog.getCommitted(), m);
+                            this.readOnly.addRequest(this.raftLog.getCommitted(), m.build());
                             this.bcastHeartbeatWithCtx(m.getEntries(0).getData());
                         }
                         case LeaseBased -> {
@@ -687,7 +693,7 @@ public class Raft {
 
     // step_candidate is shared by state Candidate and PreCandidate; the difference is
     // whether they respond to MsgRequestVote or MsgRequestPreVote.
-    private void stepCandidate(Eraftpb.Message m) throws RaftErrorException {
+    private void stepCandidate(Eraftpb.Message.Builder m) throws RaftErrorException {
         switch (m.getMsgType()) {
             case MsgPropose -> {
                 log.info("no leader at term {}; dropping proposal", this.term);
@@ -699,11 +705,11 @@ public class Raft {
             }
             case MsgHeartbeat -> {
                 this.becomeFollower(m.getTerm(), m.getFrom());
-                this.handleHeartbeat(m);
+                this.handleHeartbeat(m.build());
             }
             case MsgSnapshot -> {
                 this.becomeFollower(m.getTerm(), m.getFrom());
-                this.handleSnapshot(m);
+                this.handleSnapshot(m.build());
             }
             case MsgRequestVoteResponse, MsgRequestPreVoteResponse -> {
                 // Only handle vote responses corresponding to our candidacy (while in
@@ -738,15 +744,15 @@ public class Raft {
         }
     }
 
-    private void stepFollower(Eraftpb.Message m) throws RaftErrorException {
+    private void stepFollower(Eraftpb.Message.Builder m) throws RaftErrorException {
         switch (m.getMsgType()) {
             case MsgPropose -> {
                 if (this.leaderId == INVALID_ID) {
                     log.info("no leader at term {}; dropping proposal", this.term);
                     throw new RaftErrorException(RaftError.ProposalDropped);
                 }
-                var toSend = m.toBuilder().setTo(this.leaderId);
-                this.send(toSend);
+                m.setTo(this.leaderId);
+                this.send(m);
             }
             case MsgAppend -> {
                 this.electionElapsed = 0;
@@ -756,20 +762,20 @@ public class Raft {
             case MsgHeartbeat -> {
                 this.electionElapsed = 0;
                 this.leaderId = m.getFrom();
-                this.handleHeartbeat(m);
+                this.handleHeartbeat(m.build());
             }
             case MsgSnapshot -> {
                 this.electionElapsed = 0;
                 this.leaderId = m.getFrom();
-                this.handleSnapshot(m);
+                this.handleSnapshot(m.build());
             }
             case MsgTransferLeader -> {
                 if (this.leaderId == INVALID_ID) {
                     log.info("no leader at term {}; dropping leader transfer msg", this.term);
                     return;
                 }
-                var toSend = m.toBuilder().setTo(this.leaderId);
-                this.send(toSend);
+                m.setTo(this.leaderId);
+                this.send(m);
             }
             case MsgTimeoutNow -> {
                 if (this.promotable) {
@@ -789,8 +795,8 @@ public class Raft {
                     log.info("no leader at term {}; dropping index reading msg", this.term);
                     return;
                 }
-                var toSend = m.toBuilder().setTo(this.leaderId);
-                this.send(toSend);
+                m.setTo(this.leaderId);
+                this.send(m);
             }
             case MsgReadIndexResp -> {
                 var size = m.getEntriesList().size();
@@ -1071,7 +1077,7 @@ public class Raft {
         return entries.stream().filter(s -> s.getEntryType() == Eraftpb.EntryType.EntryConfChange).count();
     }
 
-    private void logVoteApprove(Eraftpb.Message message) {
+    private void logVoteApprove(Eraftpb.Message.Builder message) {
         log.info("[log term: {}, index: {}, vote: {}] cast vote for {} [log term: {}, index: {}] at term {} msgType {}",
                 this.raftLog.lastTerm(),
                 this.raftLog.lastIndex(),
@@ -1083,7 +1089,7 @@ public class Raft {
                 message.getMsgType());
     }
 
-    private void logVoteReject(Eraftpb.Message message) {
+    private void logVoteReject(Eraftpb.Message.Builder message) {
         log.info("[log term: {}, index: {}, vote: {}] rejected vote for {} [log term: {}, index: {}] at term {} msgType {}",
                 this.raftLog.lastTerm(),
                 this.raftLog.lastIndex(),
@@ -1095,7 +1101,7 @@ public class Raft {
                 message.getMsgType());
     }
 
-    private void handleAppendEntries(Eraftpb.Message m) {
+    private void handleAppendEntries(Eraftpb.Message.Builder m) {
         if (this.pendingRequestSnapshot == INVALID_INDEX) {
             this.sendRequestSnapshot();
             return;
@@ -1179,7 +1185,8 @@ public class Raft {
                     meta.getIndex(),
                     meta.getTerm());
 
-            var toSend = Eraftpb.Message.newBuilder().setMsgType(MsgAppendResponse)
+            var toSend = Eraftpb.Message.newBuilder()
+                    .setMsgType(MsgAppendResponse)
                     .setTo(m.getFrom())
                     .setIndex(this.raftLog.getCommitted());
             this.send(toSend);
@@ -1281,7 +1288,7 @@ public class Raft {
         return this.prs.quorumRecentlyActive(this.id, this.quorumFunction);
     }
 
-    /// Check if there is any pending confchange.
+    /// Check if there is any pending conf change.
     ///
     /// This method can be false positive.
     public boolean hasPendingConf() {
@@ -1302,6 +1309,79 @@ public class Raft {
         return new SoftState(this.leaderId, this.state);
     }
 
+    private void handleSnapshotStatus(Eraftpb.Message m, Progress pr) {
+        if (m.getReject()) {
+            pr.snapshotFailure();
+            pr.becomeProbe();
+            if (log.isDebugEnabled()) {
+                log.debug("snapshot failed, resumed sending replication messages to {}", m.getFrom());
+            }
+        } else {
+            pr.becomeProbe();
+            if (log.isDebugEnabled()) {
+                log.debug("snapshot succeeded, resumed sending replication messages to {}", m.getFrom());
+            }
+        }
+        // If snapshot finish, wait for the msgAppResp from the remote node before sending
+        // out the next msgAppend.
+        // If snapshot failure, wait for a heartbeat interval before next try
+        pr.pause();
+        pr.setPendingRequestSnapshot(INVALID_INDEX);
+    }
+
+    private void handleTransferLeader(Eraftpb.Message m, ProgressSet prs) {
+        var leadTransferee = m.getFrom();
+        if (prs.learnerIds().contains(leadTransferee)) {
+            if (log.isDebugEnabled()) {
+                log.debug("ignored transferring leadership");
+            }
+            return;
+        }
+        var lastLeadTransferee = this.leadTransferee;
+        if (lastLeadTransferee != null) {
+            if (lastLeadTransferee == leadTransferee) {
+                log.info("[term {}] transfer leadership to {} is in progress, ignores request to same node",
+                        this.term,
+                        leadTransferee);
+                return;
+            }
+            this.abortLeaderTransfer();
+            log.info("[term {}] abort previous transferring leadership to {}", this.term, lastLeadTransferee);
+        }
+        if (leadTransferee == this.id) {
+            if (log.isDebugEnabled()) {
+                log.debug("already leader; ignored transferring leadership to self");
+            }
+            return;
+        }
+        // Transfer leadership to third party.
+        log.info("[term {}] starts to transfer leadership to {}", this.term, leadTransferee);
+        // Transfer leadership should be finished in one electionTimeout
+        // so reset r.electionElapsed.
+        this.electionElapsed = 0;
+        this.leadTransferee = leadTransferee;
+        var pr = prs.get(leadTransferee);
+        if (pr.getMatched() == this.raftLog.lastIndex()) {
+            log.info("sends MsgTimeoutNow to {} immediately as {} already has up-to-date log",
+                    leadTransferee,
+                    leadTransferee);
+            this.sendTimeoutNow(leadTransferee);
+        } else {
+            this.sendAppend(leadTransferee, pr);
+        }
+    }
+
+    /// Issues a message to timeout immediately.
+    private void sendTimeoutNow(long to) {
+        var toSend = newMessageBuilder(to, MsgTimeoutNow, null);
+        this.send(toSend);
+    }
+
+    /// Specifies if the commit should be broadcast.
+    private boolean  shouldBcastCommit() {
+        return !this.skipBCastCommit || this.hasPendingConf();
+    }
+
     public void commitApply(long applied) {
         this.getRaftLog().appliedTo(applied);
     }
@@ -1312,7 +1392,7 @@ public class Raft {
         }
     }
 
-    public void addNode(long nid) throws RaftErrorException {
+    public void addNode(long id) throws RaftErrorException {
         this.addVoterOrLearner(id, false);
     }
 
@@ -1336,11 +1416,11 @@ public class Raft {
         this.getPrs().get(id).setRecentActive(true);
     }
 
-    public void addLearner(long nid) throws RaftErrorException {
+    public void addLearner(long id) throws RaftErrorException {
         this.addVoterOrLearner(id, true);
     }
 
-    public void removeNode(long nid) {
+    public void removeNode(long id) {
         this.getPrs().remove(id);
 
         // do not try to commit or abort transferring if there are no voters in the cluster.
@@ -1356,7 +1436,6 @@ public class Raft {
         // If the removed node is the lead_transferee, then abort the leadership transferring.
         if (this.state == StateRole.Leader && this.leadTransferee == id) {
             this.abortLeaderTransfer();
-            ;
         }
     }
 
@@ -1376,6 +1455,7 @@ public class Raft {
         } else {
             this.pendingRequestSnapshot = requestIndex;
             this.sendRequestSnapshot();
+            return;
         }
         throw new RaftErrorException(RaftError.RequestSnapshotDropped);
     }
@@ -1387,5 +1467,5 @@ public class Raft {
     public Storage mutStore() {
         return this.getRaftLog().getStore();
     }
-    
+
 }

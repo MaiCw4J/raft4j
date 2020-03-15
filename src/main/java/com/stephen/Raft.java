@@ -237,10 +237,10 @@ public class Raft<T extends Storage> {
 
     // send persists state to stable storage and then sends to its mailbox.
     public void send(Eraftpb.Message.Builder toSend) {
-        var type = toSend.getMsgType();
         if (log.isDebugEnabled()) {
-            log.debug("Sending from {} to {} msgType {}", this.id, toSend.getTo(), type);
+            log.debug("Sending from {} to {} msgType {}", this.id, toSend.getTo(), toSend.getMsgType());
         }
+        var type = toSend.getMsgType();
         switch (type) {
             case MsgRequestVote, MsgRequestPreVote, MsgRequestVoteResponse, MsgRequestPreVoteResponse -> {
                 if (toSend.getTerm() == 0) {
@@ -467,7 +467,6 @@ public class Raft<T extends Storage> {
             hasReady = true;
             var beatMsg = newMessage(INVALID_ID, MsgBeat, this.id);
             try {
-                log.info("leader {} send HB", this.id);
                 this.step(beatMsg);
             } catch (RaftErrorException ignored) {
             }
@@ -658,7 +657,7 @@ public class Raft<T extends Storage> {
     private void stepLeader(Eraftpb.Message.Builder m) throws RaftErrorException {
         switch (m.getMsgType()) {
             case MsgBeat -> {
-                this.bcastAppend();
+                this.bcastHeartbeat();
                 return;
             }
             case MsgCheckQuorum -> {

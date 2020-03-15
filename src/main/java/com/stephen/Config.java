@@ -9,6 +9,8 @@ import lombok.Data;
 @Data
 public class Config {
 
+    private static final int HEARTBEAT_TICK = 2;
+
     /**
      * The identity of the local raft. It cannot be 0, and must be unique in the group.
      * 本地raft唯一id
@@ -25,7 +27,7 @@ public class Config {
      * <p>
      * 多久没收到leader的心跳，该节点成为候选者
      */
-    private long electionTick;
+    private int electionTick;
 
     /**
      * HeartbeatTick is the number of node.tick invocations that must pass between
@@ -58,7 +60,7 @@ public class Config {
      * replication phase. The application transportation layer usually has its own sending
      * buffer over TCP/UDP. Set to avoid overflowing that sending buffer.
      */
-    private long maxInflightMsgs;
+    private int maxInflightMsgs;
 
     /**
      * Specify if the leader should check quorum activity. Leader steps down when
@@ -81,12 +83,12 @@ public class Config {
      * will always be suit in [min_election_tick, max_election_tick).
      * If it is 0, then election_tick will be chosen.
      */
-    private long minElectionTick;
+    private int minElectionTick;
 
     /**
      * If it is 0, then 2 * election_tick will be chosen.
      */
-    private long maxElectionTick;
+    private int maxElectionTick;
 
     /**
      * Choose the linearizability mode or the lease mode to read data. If you don’t care about the read consistency and want a higher read performance, you can use the lease mode.
@@ -106,21 +108,25 @@ public class Config {
      */
     private boolean batchAppend;
 
+    /// Function to custom `quorum` for Raft. The return value will be normalized into range
+    /// [majority, voters_len].
+    private QuorumFunction quorumFunction;
+
     public Config() {
-        long HEARTBEAT_TICK = 2;
         this.id = Globals.INVALID_ID;
         this.electionTick = HEARTBEAT_TICK * 10;
         this.heartbeatTick = HEARTBEAT_TICK;
         this.applied = 0;
         this.maxSizePerMsg = 0;
         this.maxInflightMsgs = 256;
-        this.checkQuorum = false;
-        this.preVote = false;
+        this.checkQuorum = true;
+        this.preVote = true;
         this.minElectionTick = 0;
         this.maxElectionTick = 0;
         this.readOnlyOption = ReadOnlyOption.Safe;
         this.skipBcastCommit = false;
         this.batchAppend = false;
+        this.quorumFunction = QuorumUtils::majority;
     }
 
     public Config(long id) {
@@ -131,14 +137,14 @@ public class Config {
     /**
      * The minimum number of ticks before an election.
      */
-    public long minElectionTick() {
+    public int minElectionTick() {
         return this.minElectionTick == 0 ? this.electionTick : this.minElectionTick;
     }
 
     /**
      * The maximum number of ticks before an election.
      */
-    public long maxElectionTick() {
+    public int maxElectionTick() {
         return this.maxElectionTick == 0 ? 2 * this.electionTick : this.maxElectionTick;
     }
 

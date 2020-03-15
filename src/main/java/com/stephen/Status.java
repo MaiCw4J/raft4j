@@ -2,7 +2,6 @@ package com.stephen;
 
 import com.stephen.constanst.StateRole;
 import com.stephen.progress.ProgressSet;
-import com.stephen.raft.SoftState;
 import eraftpb.Eraftpb;
 import lombok.Data;
 
@@ -37,7 +36,7 @@ public class Status {
      */
     private ProgressSet progress;
 
-    public Status(Raft raft) {
+    public <T extends Storage> Status(Raft<T> raft) {
         this.id = raft.getId();
         this.hs = raft.hardState();
         this.ss = raft.softState();

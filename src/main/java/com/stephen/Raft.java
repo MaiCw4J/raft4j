@@ -1,16 +1,13 @@
 package com.stephen;
 
 import com.google.protobuf.ByteString;
-import com.stephen.constanst.CandidacyStatus;
-import com.stephen.constanst.Globals;
-import com.stephen.constanst.StateRole;
+import com.stephen.constanst.*;
 import com.stephen.exception.PanicException;
 import com.stephen.exception.RaftError;
 import com.stephen.exception.RaftErrorException;
 import com.stephen.lang.Vec;
 import com.stephen.progress.Progress;
 import com.stephen.progress.ProgressSet;
-import com.stephen.raft.SoftState;
 import eraftpb.Eraftpb;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -26,7 +23,7 @@ import static eraftpb.Eraftpb.MessageType.*;
 @SuppressWarnings("StatementWithEmptyBody")
 @Slf4j
 @Data
-public class Raft {
+public class Raft<T extends Storage> {
 
     // CAMPAIGN_PRE_ELECTION represents the first phase of a normal election when
     // Config.pre_vote is true.
@@ -49,10 +46,10 @@ public class Raft {
     private long id;
 
     /// The current read states.
-    private List<ReadState> readStates;
+    private Vec<ReadState> readStates;
 
     /// The persistent log.
-    private RaftLog raftLog;
+    private RaftLog<T> raftLog;
 
     /// The maximum number of messages that can be inflight.
     private int maxInflight;
@@ -80,7 +77,7 @@ public class Raft {
     private Map<Long, Boolean> votes;
 
     /// The list of messages.
-    private Vec<Eraftpb.Message> msgs;
+    private Vec<Eraftpb.Message.Builder> msgs;
 
     /// The leader id
     private long leaderId;
@@ -135,12 +132,90 @@ public class Raft {
     // [min_election_timeout, max_election_timeout - 1]. It gets reset
     // when raft changes its state to follower or candidate.
     private int randomizedElectionTimeout;
-    private int min_electionTimeout;
-    private int max_electionTimeout;
+    private int minElectionTimeout;
+    private int maxElectionTimeout;
 
     private QuorumFunction quorumFunction;
 
-    private Eraftpb.Message.Builder newMessageBuilder(long to, Eraftpb.MessageType fieldType, Long from) {
+    public Raft(Config config, T store) throws RaftErrorException {
+        config.validate();
+
+        var raftState = store.initialState();
+
+        var confState = raftState.getConfState();
+        var voters = confState.getVotersList();
+        var learners = confState.getLearnersList();
+
+        this.id = config.getId();
+        this.readStates = new Vec<>();
+        this.raftLog = new RaftLog<>(store);
+        this.maxInflight = config.getMaxInflightMsgs();
+        this.maxMsgSize = config.getMaxSizePerMsg();
+        this.prs = new ProgressSet(voters.size(), learners.size());
+        this.pendingRequestSnapshot = INVALID_INDEX;
+        this.state = StateRole.Follower;
+        this.promotable = false;
+        this.checkQuorum = config.isCheckQuorum();
+        this.preVote = config.isPreVote();
+        this.readOnly = new ReadOnly(config.getReadOnlyOption());
+        this.heartbeatTimeout = config.getHeartbeatTick();
+        this.electionTimeout = config.getElectionTick();
+        this.votes = new HashMap<>();
+        this.msgs = new Vec<>();
+        this.leaderId = 0;
+        this.leadTransferee = null;
+        this.term = 0;
+        this.electionElapsed = 0;
+        this.pendingConfIndex = 0;
+        this.vote = 0;
+        this.heartbeatElapsed = 0;
+        this.randomizedElectionTimeout = 0;
+        this.minElectionTimeout = config.minElectionTick();
+        this.maxElectionTimeout = config.maxElectionTick();
+        this.skipBCastCommit = config.isSkipBcastCommit();
+        this.batchAppend = config.isBatchAppend();
+        this.quorumFunction = config.getQuorumFunction();
+
+        for (Long voterId : voters) {
+            var pr = new Progress(1, this.maxInflight);
+            try {
+                this.prs.insertVoter(voterId, pr);
+            } catch (RaftErrorException e) {
+                throw new PanicException(log, e);
+            }
+            this.promotable = voterId == this.id;
+        }
+
+        for (Long learnerId : learners) {
+            var pr = new Progress(1, this.maxInflight);
+            try {
+                this.prs.insertLearner(learnerId, pr);
+            } catch (RaftErrorException e) {
+                throw new PanicException(log, e);
+            }
+        }
+        var rs = raftState.getHardState();
+        if (rs != null && Objects.equals(rs.build(), Eraftpb.HardState.getDefaultInstance())) {
+            this.loadState(rs);
+        }
+
+        if (config.getApplied() > 0) {
+            this.commitApply(config.getApplied());
+        }
+
+        this.becomeFollower(this.term, INVALID_ID);
+
+        log.info("new raft: term {}, commit {}, applied {}, last index {}, last term {}, peers {}",
+                this.term,
+                this.raftLog.getCommitted(),
+                this.raftLog.getApplied(),
+                this.raftLog.lastIndex(),
+                this.raftLog.lastTerm(),
+                this.prs.voterIds());
+
+    }
+
+    private Eraftpb.Message.Builder newMessage(long to, Eraftpb.MessageType fieldType, Long from) {
         var builder = Eraftpb.Message.newBuilder()
                 .setTo(to)
                 .setMsgType(fieldType);
@@ -161,11 +236,14 @@ public class Raft {
 
 
     // send persists state to stable storage and then sends to its mailbox.
-    public void send(Eraftpb.Message.Builder builder) {
-        var type = builder.getMsgType();
+    public void send(Eraftpb.Message.Builder toSend) {
+        var type = toSend.getMsgType();
+        if (log.isDebugEnabled()) {
+            log.debug("Sending from {} to {} msgType {}", this.id, toSend.getTo(), type);
+        }
         switch (type) {
             case MsgRequestVote, MsgRequestPreVote, MsgRequestVoteResponse, MsgRequestPreVoteResponse -> {
-                if (builder.getTerm() == 0) {
+                if (toSend.getTerm() == 0) {
                     // All {pre-,}campaign messages need to have the term set when
                     // sending.
                     // - MsgVote: m.Term is the term the node is campaigning for,
@@ -182,21 +260,22 @@ public class Raft {
                 }
             }
             default -> {
-                if (builder.getTerm() != 0) {
-                    throw new PanicException(log, "term should not be set when sending {:?} (was {})", type.name(), builder.getTerm());
+                if (toSend.getTerm() != 0) {
+                    throw new PanicException(log, "term should not be set when sending {:?} (was {})", type.name(), toSend.getTerm());
                 }
                 // do not attach term to MsgPropose, MsgReadIndex
                 // proposals are a way to forward to the leader and
                 // should be treated as local message.
                 // MsgReadIndex is also forwarded to leader.
                 if (type != MsgPropose && type != MsgReadIndex) {
-                    builder.setTerm(this.term);
+                    toSend.setTerm(this.term);
                 }
             }
         }
-        this.msgs.add(builder.build());
+        this.msgs.add(toSend.setFrom(this.id));
     }
 
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     private boolean prepareSendSnapshot(Eraftpb.Message.Builder builder, Progress pr, long to) {
         if (pr.isRecentActive()) {
             log.info("ignore sending snapshot to {} since it is not recently active", to);
@@ -293,14 +372,15 @@ public class Raft {
         this.send(builder);
     }
 
-    private void prepareSendEntries(Eraftpb.Message.Builder builder, Progress pr, long term, List<Eraftpb.Entry> entries) {
+    private void prepareSendEntries(Eraftpb.Message.Builder builder, Progress pr, long term, List<Eraftpb.Entry.Builder> entries) {
         builder.setMsgType(MsgAppend)
                 .setIndex(pr.getNextIdx() - 1)
                 .setLogTerm(term)
-                .setCommit(this.raftLog.getCommitted());
+                .setCommit(this.raftLog.getCommitted())
+                .clearEntries();
         if ($.isNotEmpty(entries)) {
-            for (int i = 0; i < entries.size(); i++) {
-                builder.setEntries(i, entries.get(i));
+            for (Eraftpb.Entry.Builder entry : entries) {
+                builder.addEntries(entry);
             }
 
             var last = entries.get(entries.size() - 1).getIndex();
@@ -309,25 +389,21 @@ public class Raft {
     }
 
 
-    private boolean tryBatching(long to, Progress pr, List<Eraftpb.Entry> entries) {
+    private boolean tryBatching(long to, Progress pr, List<Eraftpb.Entry.Builder> entries) {
         // if MsgAppend for the receiver already exists, try_batching
         // will append the entries to the existing MsgAppend
-        for (int i = 0; i < this.msgs.size(); i++) {
-            var msg = msgs.get(i);
+        for (Eraftpb.Message.Builder msg : this.msgs) {
             if (msg.getMsgType() == MsgAppend && msg.getTo() == to) {
-                var builder = msg.toBuilder();
                 if (entries != null && !entries.isEmpty()) {
-                    if (!$.isContinuousEntries(msg, entries)) {
+                    if (!$.isContinuousEntries(msg.getEntriesList(), entries)) {
                         return false;
                     }
-
-                    var batchedEntries = builder.getEntriesList();
+                    var batchedEntries = msg.getEntriesBuilderList();
                     batchedEntries.addAll(entries);
 
                     var lastIdx = batchedEntries.get(batchedEntries.size() - 1).getIndex();
                     pr.updateState(lastIdx);
                 }
-                msgs.set(i, builder.build());
                 break;
             }
         }
@@ -342,7 +418,6 @@ public class Raft {
         };
     }
 
-    // TODO: revoke pub when there is a better way to test.
     /// Run by followers and candidates after self.election_timeout.
     ///
     /// Returns true to indicate that there will probably be some readiness need to be handled.
@@ -353,7 +428,7 @@ public class Raft {
         }
 
         this.electionElapsed = 0;
-        var toSend = newMessageBuilder(INVALID_ID, MsgHup, this.id);
+        var toSend = newMessage(INVALID_ID, MsgHup, this.id);
         try {
             this.step(toSend);
         } catch (RaftErrorException ignored) {
@@ -371,7 +446,7 @@ public class Raft {
         if (this.electionElapsed >= this.electionTimeout) {
             this.electionElapsed = 0;
             if (this.checkQuorum) {
-                var quorumMsg = newMessageBuilder(INVALID_ID, MsgCheckQuorum, this.id);
+                var quorumMsg = newMessage(INVALID_ID, MsgCheckQuorum, this.id);
                 hasReady = true;
                 try {
                     this.step(quorumMsg);
@@ -390,8 +465,9 @@ public class Raft {
         if (this.heartbeatElapsed > this.heartbeatTimeout) {
             this.heartbeatElapsed = 0;
             hasReady = true;
-            var beatMsg = newMessageBuilder(INVALID_ID, MsgBeat, this.id);
+            var beatMsg = newMessage(INVALID_ID, MsgBeat, this.id);
             try {
+                log.info("leader {} send HB", this.id);
                 this.step(beatMsg);
             } catch (RaftErrorException ignored) {
             }
@@ -496,7 +572,7 @@ public class Raft {
                 // with "pb.MsgAppResp" of higher term would force leader to step down.
                 // However, this disruption is inevitable to free this stuck node with
                 // fresh election. This can be prevented with Pre-Vote phase.
-                var resp = newMessageBuilder(m.getFrom(), MsgAppendResponse, null);
+                var resp = newMessage(m.getFrom(), MsgAppendResponse, null);
                 this.send(resp);
             } else if (msgType == MsgRequestPreVote) {
                 // Before pre_vote enable, there may be a recieving candidate with higher term,
@@ -513,7 +589,7 @@ public class Raft {
                         m.getIndex(),
                         this.term);
 
-                var builder = newMessageBuilder(m.getFrom(), MsgRequestPreVoteResponse, null)
+                var builder = newMessage(m.getFrom(), MsgRequestPreVoteResponse, null)
                         .setTerm(this.term).setReject(true);
                 this.send(builder);
             } else {
@@ -549,7 +625,7 @@ public class Raft {
                     // same in the case of regular votes, but different for pre-votes.
                     this.logVoteApprove(m);
 
-                    var resp = newMessageBuilder(m.getFrom(), voteRespMsgType(msgType), null)
+                    var resp = newMessage(m.getFrom(), voteRespMsgType(msgType), null)
                             .setReject(false)
                             .setTerm(m.getTerm());
 
@@ -562,7 +638,7 @@ public class Raft {
                     this.send(resp);
                 } else {
                     this.logVoteReject(m);
-                    var resp = newMessageBuilder(m.getFrom(), voteRespMsgType(msgType), null)
+                    var resp = newMessage(m.getFrom(), voteRespMsgType(msgType), null)
                             .setReject(true)
                             .setTerm(this.term);
 
@@ -612,16 +688,22 @@ public class Raft {
                     throw new RaftErrorException(RaftError.ProposalDropped);
                 }
 
-                for (int i = 0; i < m.getEntriesList().size(); i++) {
+                for (int i = 0; i < m.getEntriesCount(); i++) {
                     var e = m.getEntries(i);
                     if (e.getEntryType() == Eraftpb.EntryType.EntryConfChange) {
                         if (this.hasPendingConf()) {
                             log.info("propose conf entry ignored since pending unApplied configuration index {}, applied {}",
                                     this.pendingConfIndex,
                                     this.raftLog.getApplied());
+                            m.setEntries(i, Eraftpb.Entry.newBuilder().setEntryType(Eraftpb.EntryType.EntryNormal));
+                        } else {
+                            this.pendingConfIndex = this.raftLog.lastIndex() + i + 1;
                         }
                     }
                 }
+                this.appendEntry(m.getEntriesBuilderList());
+                this.bcastAppend();
+                return;
             }
             case MsgReadIndex -> {
                 long term;
@@ -657,9 +739,8 @@ public class Raft {
                                         .setMsgType(MsgReadIndexResp)
                                         .setTo(m.getFrom())
                                         .setIndex(readIndex);
-
-                                for (int i = 0; i < m.getEntriesList().size(); i++) {
-                                    toSend.setEntries(i, m.getEntries(i));
+                                for (Eraftpb.Entry entry : m.getEntriesList()) {
+                                    toSend.addEntries(entry);
                                 }
                                 this.send(toSend);
                             }
@@ -677,18 +758,214 @@ public class Raft {
                         var toSend = Eraftpb.Message.newBuilder()
                                 .setMsgType(MsgReadIndexResp)
                                 .setTo(m.getFrom())
-                                .setIndex(this.raftLog.getCommitted());
-                        for (int i = 0; i < m.getEntriesList().size(); i++) {
-                            toSend.setEntries(i, m.getEntries(i));
-                        }
+                                .setIndex(this.raftLog.getCommitted())
+                                .addAllEntries(m.getEntriesList());
                         this.send(toSend);
                     }
                 }
                 return;
             }
         }
-        // todo
+
+        var from = this.prs.get(m.getFrom());
+        if (from == null) {
+            if (log.isDebugEnabled()) {
+                log.debug("no progress available for {}", m.getFrom());
+            }
+            return;
+        }
+
         boolean sendAppend = false;
+        boolean maybeCommit = false;
+        boolean oldPaused = false;
+        List<Eraftpb.Message.Builder> moreToSend = new ArrayList<>();
+
+        // response handle
+        out: switch (m.getMsgType()) {
+            case MsgAppendResponse -> {
+                from.setRecentActive(true);
+
+                if (m.getReject()) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("received msgAppend rejection last index {}, from {}, index {}",
+                                m.getRejectHint(),
+                                m.getFrom(),
+                                m.getIndex());
+                    }
+                    if (from.maybeDecrTo(m.getIndex(), m.getRejectHint(), m.getRequestSnapshot())) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("decreased progress of {}", from);
+                        }
+                        if (from.getState() == ProgressState.Replicate) {
+                            from.becomeProbe();
+                        }
+                        sendAppend = true;
+                        break;
+                    }
+                }
+                oldPaused = from.isPaused();
+                if (!from.maybeUpdate(m.getIndex())) {
+                    break;
+                }
+
+                // Transfer leadership is in progress.
+                boolean isTimeoutNow = this.leadTransferee != null &&
+                        this.leadTransferee == m.getFrom() &&
+                        from.getMatched() == this.raftLog.lastIndex();
+                if (isTimeoutNow) {
+                    log.info("sent MsgTimeoutNow to {} after received MsgAppResp", m.getFrom());
+                    this.sendTimeoutNow(m.getFrom());
+                }
+
+                switch (from.getState()) {
+                    case Probe -> from.becomeReplicate();
+                    case Snapshot -> {
+                        if (!from.maybeSnapshotAbort()) {
+                            break out;
+                        }
+                        if (log.isDebugEnabled()) {
+                            log.debug("snapshot aborted, resumed sending replication messages to {}", m.getFrom());
+                        }
+                        from.becomeProbe();
+                    }
+                    case Replicate -> from.getIns().freeTo(m.getIndex());
+                }
+                maybeCommit = true;
+            }
+            case MsgHeartbeatResponse -> {
+                // Update the node. Drop the value explicitly since we'll check the qourum after.
+                from.setRecentActive(true);
+                from.resume();
+
+                // free one slot for the full inflights window to allow progress.
+                if (from.getState() == ProgressState.Replicate && from.getIns().full()) {
+                    from.getIns().freeFirstOne();
+                }
+
+                // Does it request snapshot?
+                if (from.getMatched() < this.raftLog.lastIndex() || from.getPendingRequestSnapshot() != INVALID_ID) {
+                    sendAppend = true;
+                }
+
+                if (this.readOnly.getOption() != ReadOnlyOption.Safe || m.getContext().isEmpty()) {
+                    break;
+                }
+
+                if (this.prs.hasQuorum(this.readOnly.recvAck(m), this.quorumFunction)) {
+                    break;
+                }
+
+                var rss = this.readOnly.advance(m.getContext());
+
+                for (ReadIndexStatus rs : rss) {
+                    var req = rs.getReq();
+                    if (req.getFrom() == INVALID_ID || req.getFrom() == this.id) {
+                        // from local member
+                        var newRs = new ReadState(rs.getIndex(), req.getEntries(0).getData());
+                        this.readStates.add(newRs);
+                    } else {
+                        var toSend = Eraftpb.Message.newBuilder()
+                                .setMsgType(MsgReadIndexResp)
+                                .setTo(req.getFrom())
+                                .setIndex(rs.getIndex())
+                                .addAllEntries(req.getEntriesList());
+                        moreToSend.add(toSend);
+                    }
+                }
+            }
+            case MsgSnapStatus -> {
+                if (from.getState() == ProgressState.Snapshot) {
+                    if (m.getReject()) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("snapshot failed, resumed sending replication messages to {}", m.getFrom());
+                        }
+                        from.snapshotFailure();
+                    } else {
+                        if (log.isDebugEnabled()) {
+                            log.debug("snapshot succeeded, resumed sending replication messages to {}", m.getFrom());
+                        }
+                    }
+                    from.becomeProbe();
+                    // If snapshot finish, wait for the msgAppResp from the remote node before sending
+                    // out the next msgAppend.
+                    // If snapshot failure, wait for a heartbeat interval before next try
+                    from.pause();
+                    from.setPendingRequestSnapshot(INVALID_INDEX);
+                }
+            }
+            case MsgUnreachable -> {
+                // During optimistic replication, if the remote becomes unreachable,
+                // there is huge probability that a MsgAppend is lost.
+                if (from.getState() != ProgressState.Replicate) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("failed to send message to {} because it is unreachable", m.getFrom());
+                    }
+                    break;
+                }
+                from.becomeProbe();
+            }
+            case MsgTransferLeader -> {
+                var leadTransferee = m.getFrom();
+                if (this.prs.learnerIds().contains(leadTransferee)) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("ignored transferring leadership");
+                    }
+                    break;
+                }
+                var lastLeadTransferee = this.leadTransferee;
+                if (lastLeadTransferee != null) {
+                    if (lastLeadTransferee == leadTransferee) {
+                        log.info("[term {}] transfer leadership to {} is in progress, ignores request to same node",
+                                this.term,
+                                leadTransferee);
+                        break;
+                    }
+                    this.abortLeaderTransfer();
+                    log.info("[term {}] abort previous transferring leadership to {}", this.term, lastLeadTransferee);
+                }
+                if (leadTransferee == this.id) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("already leader; ignored transferring leadership to self");
+                    }
+                    break;
+                }
+                // Transfer leadership to third party.
+                log.info("[term {}] starts to transfer leadership to {}", this.term, leadTransferee);
+                // Transfer leadership should be finished in one electionTimeout
+                // so reset r.electionElapsed.
+                this.electionElapsed = 0;
+                this.leadTransferee = leadTransferee;
+                var pr = this.prs.get(leadTransferee);
+                if (pr.getMatched() == this.raftLog.lastIndex()) {
+                    log.info("sends MsgTimeoutNow to {} immediately as {} already has up-to-date log",
+                            leadTransferee,
+                            leadTransferee);
+                    this.sendTimeoutNow(leadTransferee);
+                } else {
+                    this.sendAppend(leadTransferee, pr);
+                }
+            }
+        }
+
+        if (maybeCommit) {
+            if (this.maybeCommit()) {
+                if (this.shouldBcastCommit()) {
+                    this.bcastAppend();
+                }
+            } else if (oldPaused) {
+                // update() reset the wait state on this node. If we had delayed sending
+                // an update before, send it now.
+                sendAppend = true;
+            }
+        }
+
+        if (sendAppend) {
+            this.sendAppend(m.getFrom(), this.prs.get(m.getFrom()));
+        }
+
+        if (!moreToSend.isEmpty()) {
+            moreToSend.forEach(this::send);
+        }
     }
 
     // step_candidate is shared by state Candidate and PreCandidate; the difference is
@@ -705,7 +982,7 @@ public class Raft {
             }
             case MsgHeartbeat -> {
                 this.becomeFollower(m.getTerm(), m.getFrom());
-                this.handleHeartbeat(m.build());
+                this.handleHeartbeat(m);
             }
             case MsgSnapshot -> {
                 this.becomeFollower(m.getTerm(), m.getFrom());
@@ -762,7 +1039,7 @@ public class Raft {
             case MsgHeartbeat -> {
                 this.electionElapsed = 0;
                 this.leaderId = m.getFrom();
-                this.handleHeartbeat(m.build());
+                this.handleHeartbeat(m);
             }
             case MsgSnapshot -> {
                 this.electionElapsed = 0;
@@ -929,7 +1206,7 @@ public class Raft {
 
     /// Regenerates and stores the election timeout.
     public void resetRandomizedElectionTimeout() {
-        var timeout = new Random().nextInt(this.max_electionTimeout - this.min_electionTimeout + 1) + this.min_electionTimeout;
+        var timeout = new Random().nextInt(this.maxElectionTimeout - this.minElectionTimeout + 1) + this.minElectionTimeout;
 
         if (log.isDebugEnabled()) {
             log.debug("reset election timeout {} -> {} at {}",
@@ -950,7 +1227,6 @@ public class Raft {
         var i = new AtomicInteger();
         var appendEntries = entries.stream()
                 .map(s -> s.setTerm(this.term).setIndex(lastIndex + 1 + i.getAndIncrement()))
-                .map(Eraftpb.Entry.Builder::build)
                 .collect(Collectors.toList());
 
         var appendAfterIndex = this.raftLog.append(appendEntries);
@@ -983,7 +1259,7 @@ public class Raft {
                 .orElseGet(() -> this.raftLog.getApplied() + 1);
         var lastIndex = this.raftLog.getCommitted() + 1;
 
-        List<Eraftpb.Entry> entries;
+        List<Eraftpb.Entry.Builder> entries;
         try {
             entries = this.raftLog.slice(firstIndex, lastIndex, null);
         } catch (RaftErrorException e) {
@@ -1055,7 +1331,7 @@ public class Raft {
                             this.term,
                             voteMsgType);
 
-                    var msgBuilder = newMessageBuilder(id, voteMsgType, null)
+                    var msgBuilder = newMessage(id, voteMsgType, null)
                             .setTerm(term)
                             .setIndex(lastIndex)
                             .setLogTerm(lastTerm);
@@ -1073,7 +1349,7 @@ public class Raft {
         this.votes.putIfAbsent(id, vote);
     }
 
-    private long numPendingConf(List<Eraftpb.Entry> entries) {
+    private long numPendingConf(List<Eraftpb.Entry.Builder> entries) {
         return entries.stream().filter(s -> s.getEntryType() == Eraftpb.EntryType.EntryConfChange).count();
     }
 
@@ -1123,7 +1399,7 @@ public class Raft {
                 .setTo(m.getFrom())
                 .setIndex(this.raftLog.getCommitted());
 
-        var lastIdx = this.raftLog.maybeAppend(m.getIndex(), m.getLogTerm(), m.getCommit(), m.getEntriesList());
+        var lastIdx = this.raftLog.maybeAppend(m.getIndex(), m.getLogTerm(), m.getCommit(), m.getEntriesBuilderList());
 
         if (lastIdx != null) {
             toSend.setIndex(lastIdx);
@@ -1151,7 +1427,7 @@ public class Raft {
     }
 
     /// For a message, commit and send out heartbeat.
-    private void handleHeartbeat(Eraftpb.Message m) {
+    private void handleHeartbeat(Eraftpb.Message.Builder m) {
         this.raftLog.commitTo(m.getCommit());
         if (this.pendingRequestSnapshot != INVALID_INDEX) {
             this.sendRequestSnapshot();
@@ -1296,84 +1572,20 @@ public class Raft {
     }
 
     public Eraftpb.HardState hardState() {
-        return Eraftpb.HardState.getDefaultInstance()
-                .toBuilder()
+        return Eraftpb.HardState.newBuilder()
                 .setTerm(this.term)
                 .setVote(this.vote)
                 .setCommit(this.raftLog.getCommitted())
                 .build();
-
     }
 
     public SoftState softState() {
         return new SoftState(this.leaderId, this.state);
     }
 
-    private void handleSnapshotStatus(Eraftpb.Message m, Progress pr) {
-        if (m.getReject()) {
-            pr.snapshotFailure();
-            pr.becomeProbe();
-            if (log.isDebugEnabled()) {
-                log.debug("snapshot failed, resumed sending replication messages to {}", m.getFrom());
-            }
-        } else {
-            pr.becomeProbe();
-            if (log.isDebugEnabled()) {
-                log.debug("snapshot succeeded, resumed sending replication messages to {}", m.getFrom());
-            }
-        }
-        // If snapshot finish, wait for the msgAppResp from the remote node before sending
-        // out the next msgAppend.
-        // If snapshot failure, wait for a heartbeat interval before next try
-        pr.pause();
-        pr.setPendingRequestSnapshot(INVALID_INDEX);
-    }
-
-    private void handleTransferLeader(Eraftpb.Message m, ProgressSet prs) {
-        var leadTransferee = m.getFrom();
-        if (prs.learnerIds().contains(leadTransferee)) {
-            if (log.isDebugEnabled()) {
-                log.debug("ignored transferring leadership");
-            }
-            return;
-        }
-        var lastLeadTransferee = this.leadTransferee;
-        if (lastLeadTransferee != null) {
-            if (lastLeadTransferee == leadTransferee) {
-                log.info("[term {}] transfer leadership to {} is in progress, ignores request to same node",
-                        this.term,
-                        leadTransferee);
-                return;
-            }
-            this.abortLeaderTransfer();
-            log.info("[term {}] abort previous transferring leadership to {}", this.term, lastLeadTransferee);
-        }
-        if (leadTransferee == this.id) {
-            if (log.isDebugEnabled()) {
-                log.debug("already leader; ignored transferring leadership to self");
-            }
-            return;
-        }
-        // Transfer leadership to third party.
-        log.info("[term {}] starts to transfer leadership to {}", this.term, leadTransferee);
-        // Transfer leadership should be finished in one electionTimeout
-        // so reset r.electionElapsed.
-        this.electionElapsed = 0;
-        this.leadTransferee = leadTransferee;
-        var pr = prs.get(leadTransferee);
-        if (pr.getMatched() == this.raftLog.lastIndex()) {
-            log.info("sends MsgTimeoutNow to {} immediately as {} already has up-to-date log",
-                    leadTransferee,
-                    leadTransferee);
-            this.sendTimeoutNow(leadTransferee);
-        } else {
-            this.sendAppend(leadTransferee, pr);
-        }
-    }
-
     /// Issues a message to timeout immediately.
     private void sendTimeoutNow(long to) {
-        var toSend = newMessageBuilder(to, MsgTimeoutNow, null);
+        var toSend = newMessage(to, MsgTimeoutNow, null);
         this.send(toSend);
     }
 
@@ -1466,6 +1678,19 @@ public class Raft {
 
     public Storage mutStore() {
         return this.getRaftLog().getStore();
+    }
+
+    /// For a given hardState, load the state into self.
+    private void loadState(Eraftpb.HardState.Builder hs) {
+        if (hs.getCommit() < this.raftLog.getCommitted() || hs.getCommit() > this.raftLog.lastIndex()) {
+            throw new PanicException(log, "hs.commit {} is out of range [{}, {}]",
+                    hs.getCommit(),
+                    this.raftLog.getCommitted(),
+                    this.raftLog.lastIndex());
+        }
+        this.raftLog.setCommitted(hs.getCommit());
+        this.term = hs.getTerm();
+        this.vote = hs.getVote();
     }
 
 }

@@ -15,7 +15,7 @@ public class Unstable {
     private Eraftpb.Snapshot snapshot;
 
     /// All entries that have not yet been written to storage.
-    private Vec<Eraftpb.Entry> entries;
+    private Vec<Eraftpb.Entry.Builder> entries;
 
     /// The offset from the vector index.
     private long offset;
@@ -105,7 +105,7 @@ public class Unstable {
     }
 
     /// Append entries to unstable, truncate local block first if overlapped.
-    public void truncateAndAppend(List<Eraftpb.Entry> entries) {
+    public void truncateAndAppend(List<Eraftpb.Entry.Builder> entries) {
         var after = entries.get(0).getIndex();
         if (after == this.offset + this.entries.size()) {
             // after is the next index in the self.entries, append directly
@@ -120,7 +120,7 @@ public class Unstable {
             // truncate to after and copy to self.entries then append
             var offset = this.offset;
             this.mustCheckOutOfBounds(offset, after);
-            this.entries.truncate((int)(after - offset));
+            this.entries.truncate(after - offset);
             this.entries.addAll(entries);
         }
     }
@@ -131,7 +131,7 @@ public class Unstable {
     ///
     /// Panics if the `lo` or `hi` are out of bounds.
     /// Panics if `lo > hi`.
-    public List<Eraftpb.Entry> slice(long low, long high) {
+    public List<Eraftpb.Entry.Builder> slice(long low, long high) {
         this.mustCheckOutOfBounds(low, high);
         return this.entries.subList((int) (low - this.offset), (int) (high - this.offset));
     }

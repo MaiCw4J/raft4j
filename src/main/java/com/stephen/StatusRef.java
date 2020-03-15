@@ -1,6 +1,7 @@
-package com.stephen.raft;
+package com.stephen;
 
 import com.stephen.Raft;
+import com.stephen.SoftState;
 import com.stephen.constanst.StateRole;
 import com.stephen.progress.ProgressSet;
 import eraftpb.Eraftpb;

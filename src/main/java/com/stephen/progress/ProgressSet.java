@@ -187,7 +187,7 @@ public class ProgressSet {
 
         var quorum = QuorumUtils.calculateQuorum(qf, matched.size());
 
-        return matched.get(quorum);
+        return matched.get(quorum - 1);
 
     }
 

@@ -2,20 +2,16 @@ package com.stephen;
 
 import com.google.protobuf.ByteString;
 import com.stephen.constanst.SnapshotStatus;
+import com.stephen.exception.PanicException;
 import com.stephen.exception.RaftError;
 import com.stephen.exception.RaftErrorException;
-import com.stephen.lang.Vec;
-import com.stephen.raft.Ready;
-import com.stephen.raft.SoftState;
-import com.stephen.raft.StatusRef;
 import eraftpb.Eraftpb;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.HashSet;
+import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 
 import static com.stephen.constanst.Globals.INVALID_ID;
 
@@ -27,39 +23,44 @@ import static com.stephen.constanst.Globals.INVALID_ID;
 @Slf4j
 @Data
 @AllArgsConstructor
-public class RawNode {
+public class RawNode<T extends Storage> {
 
-    private Raft raft;
+    private Raft<T> raft;
 
     private Eraftpb.HardState prevHs;
 
     private SoftState prevSs;
 
-    public RawNode(Config config, Storage store) {
-        assert !(config.getId() == 0);
-        Raft r = new Raft();
-        RawNode rn = new RawNode(r, Eraftpb.HardState.getDefaultInstance(), new SoftState());
-        rn.setPrevHs(rn.getRaft().hardState());
-        rn.setPrevSs(rn.getRaft().softState());
-        log.info("RawNode created with id {}.", rn.getRaft().getId());
+    public RawNode(Config config, T store) throws RaftErrorException {
+        if (config.getId() == 0) {
+            throw new PanicException("config.id must not be zero");
+        }
+
+        this.raft = new Raft<>(config, store);
+        this.prevHs = this.raft.hardState();
+        this.prevSs = this.raft.softState();
+
+        log.info("RawNode created with id {}.", this.raft.getId());
     }
 
-    public static RawNode withDefaultLogger(Config c, Storage store) {
-        return new RawNode(c, store);
+    public static <T extends Storage> RawNode<T> withDefaultLogger(Config c, T store) throws RaftErrorException {
+        return new RawNode<>(c, store);
     }
 
     public void commitReady(Ready rd) {
         if (rd.getSs() != null) {
             this.prevSs = rd.getSs();
         }
-        if (rd.getHs() != null && rd.getHs() == Eraftpb.HardState.getDefaultInstance()) {
-            this.prevHs = rd.getHs();
+
+        var hh = rd.getHs();
+        if (hh != null && !Objects.equals(rd.getHs(), Eraftpb.HardState.getDefaultInstance())) {
+            this.prevHs = hh;
         }
-        if (!rd.getEntries().isEmpty()) {
-            Eraftpb.Entry e = rd.getEntries().last();
-            this.raft.getRaftLog().stableTo(e.getIndex(), e.getTerm());
-        }
-        if (rd.getSnapshot() != Eraftpb.Snapshot.getDefaultInstance()) {
+
+        rd.getEntries().last()
+                .ifPresent(last -> this.raft.getRaftLog().stableTo(last.getIndex(), last.getTerm()));
+
+        if (Objects.equals(rd.getSnapshot(), Eraftpb.Snapshot.getDefaultInstance())) {
             this.raft.getRaftLog().stableSnapTo(rd.getSnapshot().getMetadata().getIndex());
         }
         if (!rd.getReadStates().isEmpty()) {
@@ -79,25 +80,19 @@ public class RawNode {
      * Campaign causes this RawNode to transition to candidate state.
      */
     public void campaign() throws RaftErrorException {
-        this.raft.step(Eraftpb.Message.getDefaultInstance()
-                .toBuilder()
-                .setMsgType(Eraftpb.MessageType.MsgHup)
-                .build());
+        this.raft.step(Eraftpb.Message.newBuilder().setMsgType(Eraftpb.MessageType.MsgHup));
     }
 
     /**
      * Propose proposes data be appended to the raft log.
      */
     public void propose(ByteString context, ByteString data) throws RaftErrorException {
-        this.raft.step(Eraftpb.Message.getDefaultInstance()
-                .toBuilder()
+        this.raft.step(Eraftpb.Message.newBuilder()
                 .setMsgType(Eraftpb.MessageType.MsgPropose)
                 .setFrom(this.raft.getId())
-                .addEntries(Eraftpb.Entry.getDefaultInstance()
-                        .toBuilder()
+                .addEntries(Eraftpb.Entry.newBuilder()
                         .setData(data)
-                        .setContext(context))
-                .build());
+                        .setContext(context)));
     }
 
     /**
@@ -112,15 +107,12 @@ public class RawNode {
      * ProposeConfChange proposes a config change.
      */
     public void proposeConfChange(ByteString context, Eraftpb.ConfChange cc) throws RaftErrorException {
-        this.raft.step(Eraftpb.Message.getDefaultInstance()
-                .toBuilder()
+        this.raft.step(Eraftpb.Message.newBuilder()
                 .setMsgType(Eraftpb.MessageType.MsgPropose)
-                .addEntries(Eraftpb.Entry.getDefaultInstance()
-                        .toBuilder()
+                .addEntries(Eraftpb.Entry.newBuilder()
                         .setEntryType(Eraftpb.EntryType.EntryConfChange)
                         .setData(cc.toByteString())
-                        .setContext(context))
-                .build());
+                        .setContext(context)));
     }
 
     /**
@@ -128,10 +120,9 @@ public class RawNode {
      */
     public Eraftpb.ConfState applyConfChange(Eraftpb.ConfChange cc) throws RaftErrorException {
         if (cc.getNodeId() == INVALID_ID) {
-            return Eraftpb.ConfState.getDefaultInstance()
-                    .toBuilder()
-                    .addAllVoters(new HashSet<>(this.raft.getPrs().voterIds()))
-                    .addAllLearners(new HashSet<>(this.raft.getPrs().learnerIds()))
+            return Eraftpb.ConfState.newBuilder()
+                    .addAllVoters(this.raft.getPrs().voterIds())
+                    .addAllLearners(this.raft.getPrs().learnerIds())
                     .build();
         }
         long nid = cc.getNodeId();
@@ -152,7 +143,7 @@ public class RawNode {
             throw new RaftErrorException(RaftError.StepLocalMsg);
         }
         if (this.raft.getPrs().get(m.getFrom()) != null || !isResponseMsg(m.getMsgType())) {
-            this.raft.step(m);
+            this.raft.step(m.toBuilder());
             return;
         }
         throw new RaftErrorException(RaftError.StepPeerNotFound);
@@ -198,26 +189,30 @@ public class RawNode {
      * Given an index, can determine if there is a ready state from that time.
      */
     public boolean hasReadySince(Long appliedIdx) {
-        Raft raft = this.raft;
-        if (!raft.getMsgs().isEmpty() || raft.getRaftLog().unstableEntries() != null) {
+        if (!this.raft.getMsgs().isEmpty() || this.raft.getRaftLog().unstableEntries() != null) {
             return true;
         }
-        if (!raft.getReadStates().isEmpty()) {
+
+        if (!this.raft.getReadStates().isEmpty()) {
             return true;
         }
-        if (isEmptySnap(this.snap())) {
+
+        if (Optional.ofNullable(this.snap()).map(this::isEmptySnap).orElse(false)) {
             return true;
         }
+
         if (Optional.ofNullable(appliedIdx)
-                .map(idx -> raft.getRaftLog().hasNextEntriesSince(idx))
-                .orElse(raft.getRaftLog().hasNextEntries())) {
+                .map(idx -> this.raft.getRaftLog().hasNextEntriesSince(idx))
+                .orElseGet(() -> this.raft.getRaftLog().hasNextEntries())) {
             return true;
         }
-        if (raft.softState() != this.prevSs) {
+
+        if (!Objects.equals(this.raft.softState(), this.prevSs)) {
             return true;
         }
-        Eraftpb.HardState hs = raft.hardState();
-        return hs != Eraftpb.HardState.getDefaultInstance() && hs != this.prevHs;
+
+        Eraftpb.HardState hs = this.raft.hardState();
+        return !Objects.equals(hs, Eraftpb.HardState.getDefaultInstance()) && !Objects.equals(hs, this.prevHs);
     }
 
     public Eraftpb.Snapshot snap() {
@@ -264,11 +259,9 @@ public class RawNode {
      * ReportUnreachable reports the given node is not reachable for the last send.
      */
     public void reportUnreachable(long id) throws RaftErrorException {
-        this.raft.step(Eraftpb.Message.getDefaultInstance()
-                .toBuilder()
+        this.raft.step(Eraftpb.Message.newBuilder()
                 .setMsgType(Eraftpb.MessageType.MsgUnreachable)
-                .setFrom(id)
-                .build());
+                .setFrom(id));
     }
 
     /**
@@ -276,12 +269,10 @@ public class RawNode {
      */
     public void reportSnapshot(long id, SnapshotStatus status) throws RaftErrorException {
         boolean rej = status == SnapshotStatus.Failure;
-        this.raft.step(Eraftpb.Message.getDefaultInstance()
-                .toBuilder()
+        this.raft.step(Eraftpb.Message.newBuilder()
                 .setMsgType(Eraftpb.MessageType.MsgSnapStatus)
                 .setFrom(id)
-                .setReject(rej)
-                .build());
+                .setReject(rej));
     }
 
     /**
@@ -296,11 +287,9 @@ public class RawNode {
      * TransferLeader tries to transfer leadership to the given transferee.
      */
     public void transferLeader(long transferee) throws RaftErrorException {
-        this.raft.step(Eraftpb.Message.getDefaultInstance()
-                .toBuilder()
+        this.raft.step(Eraftpb.Message.newBuilder()
                 .setMsgType(Eraftpb.MessageType.MsgTransferLeader)
-                .setFrom(transferee)
-                .build());
+                .setFrom(transferee));
     }
 
     /**
@@ -310,13 +299,9 @@ public class RawNode {
      * processed safely. The read state will have the same rctx attached.
      */
     public void readIndex(ByteString rctx) throws RaftErrorException {
-        this.raft.step(Eraftpb.Message.getDefaultInstance()
-                .toBuilder()
+        this.raft.step(Eraftpb.Message.newBuilder()
                 .setMsgType(Eraftpb.MessageType.MsgReadIndex)
-                .addEntries(Eraftpb.Entry.getDefaultInstance()
-                        .toBuilder()
-                        .setData(rctx))
-                .build());
+                .addEntries(Eraftpb.Entry.newBuilder().setData(rctx)));
     }
 
     /**
@@ -344,4 +329,25 @@ public class RawNode {
     public void setBatchAppend(boolean batchAppend) {
         this.raft.setBatchAppend(batchAppend);
     }
+
+    /// Advance notifies the RawNode that the application has applied and saved progress in the
+    /// last Ready results.
+    public void advance(Ready ready) {
+        this.advanceAppend(ready);
+        var commitIdx = this.prevHs.getCommit();
+        if (commitIdx != 0) {
+            // In most cases, prevHardSt and rd.HardState will be the same
+            // because when there are new entries to apply we just sent a
+            // HardState with an updated Commit value. However, on initial
+            // startup the two are different because we don't send a HardState
+            // until something changes, but we do send any un-applied but
+            // committed entries (and previously-committed entries may be
+            // incorporated into the snapshot, even if rd.CommittedEntries is
+            // empty). Therefore we mark all committed entries as applied
+            // whether they were included in rd.HardState or not.
+            this.advanceApply(commitIdx);
+        }
+    }
+
+
 }

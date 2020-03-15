@@ -3,6 +3,7 @@ package com.stephen.lang;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Optional;
 
 public class Vec<E> extends ArrayList<E> {
 
@@ -26,11 +27,17 @@ public class Vec<E> extends ArrayList<E> {
         removeRange(fromIndex, toIndex);
     }
 
-    public E first() {
-        return get(0);
+    public Optional<E> first() {
+        if (isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(get(0));
     }
 
-    public E last() {
-        return get(this.size() - 1);
+    public Optional<E> last() {
+        if (isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(get(this.size() - 1));
     }
 }

@@ -3,11 +3,13 @@ package com.stephen.progress;
 import com.stephen.constanst.ProgressState;
 import com.stephen.exception.PanicException;
 import lombok.Data;
+import lombok.ToString;
 
 import static com.stephen.constanst.Globals.INVALID_INDEX;
 
 @Data
-public class Progress implements Cloneable {
+@ToString
+public class Progress {
     /// How much state is matched.
     private long matched;
 

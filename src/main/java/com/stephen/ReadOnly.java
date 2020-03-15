@@ -47,7 +47,7 @@ public class ReadOnly {
     /// Notifies the ReadOnly struct that the raft state machine received
     /// an acknowledgment of the heartbeat that attached with the read only request
     /// context.
-    private Set<Long> recvAck(Eraftpb.Message m) {
+    public Set<Long> recvAck(Eraftpb.Message.Builder m) {
         var rs = this.pendingReadIndex.get(m.getContext());
         if (rs != null) {
             rs.getAcks().add(m.getFrom());
@@ -64,7 +64,7 @@ public class ReadOnly {
     /// Advances the read only request queue kept by the ReadOnly struct.
     /// It de queues the requests until it finds the read only request that has
     /// the same context as the given `m`.
-    public List<ReadIndexStatus> advance(Eraftpb.Message m) {
+    public List<ReadIndexStatus> advance(ByteString ctx) {
         List<ReadIndexStatus> rss = new ArrayList<>();
         ByteString bytes;
         while ((bytes = this.readIndexQueue.pollFirst()) != null) {
@@ -73,7 +73,7 @@ public class ReadOnly {
                 throw new PanicException(log, "cannot find correspond read state from pending map");
             }
             rss.add(ris);
-            if (Objects.equals(bytes, m.getContext())) {
+            if (Objects.equals(bytes, ctx)) {
                 break;
             }
         }

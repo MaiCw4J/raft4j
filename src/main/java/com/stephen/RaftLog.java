@@ -8,16 +8,16 @@ import eraftpb.Eraftpb;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Data
-public class RaftLog {
+public class RaftLog<T extends Storage> {
 
     /// Contains all stable entries since the last snapshot.
-    private Storage store;
+    private T store;
 
     /// Contains all unstable entries and snapshot.
     /// they will be saved into storage.
@@ -34,7 +34,7 @@ public class RaftLog {
     private long applied;
 
     /// Creates a new raft log with a given storage and tag.
-    public RaftLog(Storage store) throws RaftErrorException {
+    public RaftLog(T store) throws RaftErrorException {
         long firstIndex = store.firstIndex() - 1;
         this.committed = firstIndex;
         this.applied = firstIndex;
@@ -125,8 +125,8 @@ public class RaftLog {
     ///
     /// The first entry MUST have an index equal to the argument 'from'.
     /// The index of the given entries MUST be continuously increasing.
-    public long findConflict(List<Eraftpb.Entry> entries) {
-        for (Eraftpb.Entry entry : entries) {
+    public long findConflict(List<Eraftpb.Entry.Builder> entries) {
+        for (Eraftpb.Entry.Builder entry : entries) {
             if (this.matchTerm(entry.getIndex(), entry.getTerm())) {
                 continue;
             }
@@ -155,7 +155,7 @@ public class RaftLog {
         }
     }
 
-    public Long maybeAppend(long idx, long term, long committed, List<Eraftpb.Entry> entries) {
+    public Long maybeAppend(long idx, long term, long committed, List<Eraftpb.Entry.Builder> entries) {
         if (this.matchTerm(idx, term)) {
             var conflictIdx = this.findConflict(entries);
             if (conflictIdx != 0 && conflictIdx <= this.committed) {
@@ -202,7 +202,7 @@ public class RaftLog {
     }
 
     /// Appends a set of entries to the unstable list.
-    public long append(List<Eraftpb.Entry> entries) {
+    public long append(List<Eraftpb.Entry.Builder> entries) {
         if (entries == null || entries.isEmpty()) {
             return this.lastIndex();
         }
@@ -217,7 +217,7 @@ public class RaftLog {
     }
 
     /// Returns slice of entries that are not committed.
-    public List<Eraftpb.Entry> unstableEntries() {
+    public List<Eraftpb.Entry.Builder> unstableEntries() {
         var entries = this.unstable.getEntries();
         if (entries.isEmpty()) {
             return null;
@@ -235,7 +235,7 @@ public class RaftLog {
     }
 
     /// Returns entries starting from a particular index and not exceeding a bytesize.
-    public Vec<Eraftpb.Entry> entries(long idx, long maxSize) throws RaftErrorException {
+    public Vec<Eraftpb.Entry.Builder> entries(long idx, long maxSize) throws RaftErrorException {
         var last = this.lastIndex();
         if (idx > last) {
             return new Vec<>();
@@ -245,23 +245,27 @@ public class RaftLog {
 
     /// Grabs a slice of entries from the raft. Unlike a rust slice pointer, these are
     /// returned by value. The result is truncated to the max_size in bytes.
-    public Vec<Eraftpb.Entry> slice(long low, long high, Long maxSize) throws RaftErrorException {
+    public Vec<Eraftpb.Entry.Builder> slice(long low, long high, Long maxSize) throws RaftErrorException {
         this.mustCheckOutOfBounds(low, high);
 
         if (low == high) {
             return new Vec<>();
         }
 
-        Vec<Eraftpb.Entry> entries = new Vec<>();
+        Vec<Eraftpb.Entry.Builder> entries = new Vec<>();
         var offset = this.unstable.getOffset();
         if (low < offset) {
             var unstableHigh = Math.min(high, offset);
 
             try {
-                entries = this.store.entries(low, unstableHigh, maxSize);
-                if (entries.size() < unstableHigh - low) {
-                    return entries;
+                var storeEntries = this.store.entries(low, unstableHigh, maxSize)
+                        .stream()
+                        .map(Eraftpb.Entry::toBuilder)
+                        .collect(Collectors.toCollection(Vec::new));
+                if (storeEntries.size() < unstableHigh - low) {
+                    return storeEntries;
                 }
+                entries.addAll(storeEntries);
             } catch (RaftErrorException e) {
                 switch (e.getError()) {
                     case Storage_Compacted -> throw e;
@@ -277,8 +281,7 @@ public class RaftLog {
                 entries.addAll(unstableEntries);
             }
         }
-
-        $.limitSize(entries, maxSize);
+        $.limitBuilderSize(entries, maxSize);
         return entries;
     }
 
@@ -339,12 +342,12 @@ public class RaftLog {
         this.unstable.restore(snapshot);
     }
 
-    public Vec<Eraftpb.Entry> nextEntriesSince(long sinceIdx) {
+    public Vec<Eraftpb.Entry.Builder> nextEntriesSince(long sinceIdx) {
         long offset = Math.max(sinceIdx + 1, this.firstIndex());
         long committed = this.committed;
         if (committed + 1 > offset) {
             try {
-                return (Vec<Eraftpb.Entry>) this.slice(offset, committed + 1, null);
+                return this.slice(offset, committed + 1, null);
             } catch (RaftErrorException e) {
                 throw new PanicException(log, "{}", e);
             }
@@ -352,7 +355,7 @@ public class RaftLog {
         return null;
     }
 
-    public Vec<Eraftpb.Entry> nextEntries() {
+    public Vec<Eraftpb.Entry.Builder> nextEntries() {
         return this.nextEntriesSince(this.applied);
     }
 

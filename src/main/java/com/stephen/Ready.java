@@ -1,7 +1,5 @@
-package com.stephen.raft;
+package com.stephen;
 
-import com.stephen.Raft;
-import com.stephen.ReadState;
 import com.stephen.lang.Vec;
 import eraftpb.Eraftpb;
 import lombok.Data;
@@ -38,35 +36,33 @@ public class Ready {
 
     private boolean mustSync;
 
-    public Ready() {
-        this.entries = new Vec<>();
-        this.committedEntries = new Vec<>();
-        this.ss = new SoftState();
-        this.hs = Eraftpb.HardState.getDefaultInstance();
-        this.readStates = new Vec<>();
-        this.snapshot = Eraftpb.Snapshot.getDefaultInstance();
-        this.messages = new Vec<>();
-        this.mustSync = false;
-    }
-
-    public Ready(Raft raft, SoftState prevSs, Eraftpb.HardState prevHs, Long sinceIdx) {
-        this();
-        this.entries = raft.getRaftLog()
-                .unstableEntries()
+    public <T extends Storage> Ready(Raft<T> raft, SoftState prevSs, Eraftpb.HardState prevHs, Long sinceIdx) {
+        this.entries = Optional.ofNullable(raft.getRaftLog().unstableEntries()).orElseGet(Vec::new)
                 .stream()
+                .map(Eraftpb.Entry.Builder::build)
                 .collect(Collectors.toCollection(Vec::new));
+
         if (!raft.getMsgs().isEmpty()) {
-            this.setMessages(new Vec<>(raft.getMsgs()));
-            raft.getMsgs().clear();
+            var raftMsg = raft.getMsgs();
+            this.messages = raftMsg
+                    .stream()
+                    .map(Eraftpb.Message.Builder::build)
+                    .collect(Collectors.toCollection(Vec::new));
+            raftMsg.clear();
+        } else {
+            this.messages = new Vec<>();
         }
-        this.committedEntries = Optional.ofNullable(
-                Optional.ofNullable(sinceIdx)
-                        .map(idx -> raft.getRaftLog().nextEntriesSince(idx))
-                        .orElse(raft.getRaftLog().nextEntries()))
-                .orElseGet(Vec::new);
+
+        this.committedEntries = Optional.ofNullable(sinceIdx)
+                .map(idx -> raft.getRaftLog().nextEntriesSince(idx))
+                .orElseGet(() -> Optional.ofNullable(raft.getRaftLog().nextEntries()).orElseGet(Vec::new))
+                .stream()
+                .map(Eraftpb.Entry.Builder::build)
+                .collect(Collectors.toCollection(Vec::new));
+
         SoftState ss = raft.softState();
         if (ss != prevSs) {
-            this.setSs(ss);
+            this.ss = ss;
         }
         Eraftpb.HardState hs = raft.hardState();
         if (hs != prevHs) {
@@ -77,10 +73,14 @@ public class Ready {
         }
         if (raft.getRaftLog().getUnstable().getSnapshot() != null) {
             this.snapshot = raft.getRaftLog().getUnstable().getSnapshot().toBuilder().build();
+        } else {
+            this.snapshot = Eraftpb.Snapshot.getDefaultInstance();;
         }
+
         if (!raft.getReadStates().isEmpty()) {
-            this.setReadStates(new Vec<>(raft.getReadStates()));
+            this.readStates = new Vec<>(raft.getReadStates());
+        } else {
+            this.readStates = new Vec<>();
         }
     }
-    
 }
